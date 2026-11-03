@@ -1,6 +1,10 @@
 //! Runtime configuration, mirroring .NET `Settings` (`Muse2Api/Settings.cs`).
 //! Every value comes from a `MUSE2API_*` environment variable with the same
-//! name and default as the .NET original.
+//! name and default as the .NET original — EXCEPT `DRIVER`: .NET defaults
+//! to `mock`, but since 4 Nov 2026 (Bree: default driver jadi browser)
+//! the Rust gateway defaults to `browser`, so a fresh install / reset
+//! talks to Muse for real instead of echoing. `mock` stays a valid
+//! explicit choice (`MUSE2API_DRIVER=mock`).
 //!
 //! This is the canonical owner of `Settings` (see CONTRACTS.md §11): the
 //! `muse-gateway` skeleton's `settings.rs` was the Phase 1 copy and the
@@ -71,7 +75,7 @@ impl Default for Settings {
             data_dir: PathBuf::from("data"),
             request_log_retention_days: 14.0,
             media_retention_days: 14.0,
-            driver: "mock".to_string(),
+            driver: "browser".to_string(),
             site_url: "https://muse.ai".to_string(),
             chat_timeout: 300.0,
             first_token_timeout: 45.0,
@@ -115,7 +119,7 @@ impl Settings {
             data_dir: PathBuf::from(env("DATA_DIR", "data")),
             request_log_retention_days: env_f64("REQUEST_LOG_RETENTION_DAYS", 14.0),
             media_retention_days: env_f64("MEDIA_RETENTION_DAYS", 14.0),
-            driver: env("DRIVER", "mock"),
+            driver: env("DRIVER", "browser"),
             site_url: env("SITE_URL", "https://muse.ai"),
             chat_timeout: env_f64("CHAT_TIMEOUT", 300.0),
             first_token_timeout: env_f64("FIRST_TOKEN_TIMEOUT", 45.0),
@@ -397,7 +401,11 @@ mod tests {
         assert_eq!(s.host, "127.0.0.1");
         assert_eq!(s.port, 18610);
         assert_eq!(s.log_level, "INFO");
-        assert_eq!(s.driver, "mock");
+        // Default driver sengaja BUKAN .NET (`mock`): sejak 4 Nov 2026
+        // default gateway adalah `browser` (Bree) — fresh install / reset
+        // langsung jalan ke Muse beneran, bukan echo mock.
+        assert_eq!(s.driver, "browser");
+        assert_eq!(Settings::default().driver, "browser");
         assert_eq!(s.site_url, "https://muse.ai");
         assert_eq!(s.data_dir, PathBuf::from("data"));
         assert_eq!(s.pool_strategy, "affinity");
@@ -408,6 +416,17 @@ mod tests {
         assert_eq!(s.browser_profile_dir, None);
         assert_eq!(s.profile_dir(), PathBuf::from("data/browser-profile"));
         assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn explicit_mock_driver_still_mock() {
+        // Mock tetap bisa dipilih eksplisit — yang berubah hanya defaultnya.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set(&[("MUSE2API_DRIVER", "mock")]);
+        let s = Settings::load();
+        assert_eq!(s.driver, "mock");
+        assert!(s.validate().is_ok());
+        assert_eq!(Settings::default().driver, "browser");
     }
 
     #[test]

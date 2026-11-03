@@ -465,6 +465,27 @@ function App() {
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveChanges(changes), [changes]);
 
+  // History-recovery (4 Nov 2026): if the startup load spuriously came
+  // back empty while a non-empty list is stored for this workspace
+  // (storage not ready at first read), restore the visible list instead
+  // of showing an empty sidebar. The store-level guard already stops the
+  // [] from overwriting storage; this only repairs the in-memory state.
+  // Best-effort, and a no-op in every normal flow (a new workspace, or a
+  // list the user explicitly cleared, both load [] here too).
+  const historyRecoveredRef = useRef(false);
+  useEffect(() => {
+    if (historyRecoveredRef.current) return;
+    historyRecoveredRef.current = true;
+    if (convsRef.current.length === 0) {
+      const stored = loadConversations(settingsRef.current.workspacePath);
+      if (stored.length > 0) {
+        setConversations(stored);
+        if (!activeIdRef.current) setActiveId(stored[0].id);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // --- Ctrl/Cmd+K: new conversation ---
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1249,7 +1270,17 @@ function App() {
                   /* best-effort cleanup */
                 });
               }
-              setConversations((prev) => prev.filter((c) => c.id !== id));
+              // Guard (4 Nov 2026): deleting the LAST conversation is the
+              // one explicit user action allowed to persist an empty list
+              // — the store-level guard blocks every other [] write, so
+              // the intent must be declared here, before the save effect
+              // runs. Deleting one of several needs no flag (list stays
+              // non-empty).
+              const remaining = convsRef.current.filter((c) => c.id !== id);
+              setConversations(remaining);
+              if (remaining.length === 0) {
+                saveConversations([], convWsRef.current, { allowEmptyOverwrite: true });
+              }
               if (activeId === id) setActiveId(null);
             }}
             models={models}

@@ -64,7 +64,7 @@ pub struct BackendStatus {
     pub base_url: Option<String>,
     pub port: Option<u16>,
     pub pid: Option<u32>,
-    /// How the backend was launched, e.g. "muse-gateway.exe (driver: mock)".
+    /// How the backend was launched, e.g. "muse-gateway.exe (driver: browser)".
     pub launch_mode: Option<String>,
     /// Why the backend last failed, if it did (see `backend_status`).
     /// None while a backend is running or no failure was recorded.
@@ -360,6 +360,23 @@ fn resolve_backend_path(explicit: Option<String>) -> Result<PathBuf, String> {
     ))
 }
 
+/// Normalise the requested driver: empty / absent means the default.
+/// Default is "browser" (real Muse via Chromium) — a fresh install /
+/// settings reset must never silently land on mock (4 Nov 2026: the
+/// reset left the app echoing "[mock:muse-chat] You said: ..." instead
+/// of chatting with real Muse). An explicit "mock" is still honoured
+/// (Settings → Driver); only the DEFAULT changed.
+fn resolve_driver(driver: Option<String>) -> Result<String, String> {
+    let driver = driver
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "browser".to_string());
+    if driver != "mock" && driver != "browser" {
+        return Err(format!("unknown driver '{driver}' (expected mock or browser)"));
+    }
+    Ok(driver)
+}
+
 /// Generate a `m2a-<36 hex>` bearer key for the sidecar. Randomness comes
 /// from `RandomState` (OS-seeded per process); this is a loopback-local
 /// bearer, not a user credential — it only proves the caller is this app.
@@ -442,13 +459,7 @@ fn start_backend_inner(
         state.backend = None;
     }
 
-    let driver = driver
-        .map(|d| d.trim().to_ascii_lowercase())
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| "mock".to_string());
-    if driver != "mock" && driver != "browser" {
-        return Err(format!("unknown driver '{driver}' (expected mock or browser)"));
-    }
+    let driver = resolve_driver(driver)?;
 
     let backend_path = resolve_backend_path(backend_path)?;
     let port = pick_free_port()?;
@@ -459,8 +470,11 @@ fn start_backend_inner(
 
     // Loopback only, free port. The gateway reads its own API key itself.
     // The bearer key is generated here and passed in (see RunningBackend).
-    // The driver choice is forwarded so real chat uses the browser driver
-    // (default mock = echo replies, no real Muse).
+    // The driver choice is forwarded so real chat uses the browser driver.
+    // Default is browser (real Muse via Chromium). Mock only echoes
+    // replies and is for testing — a fresh install / settings reset must
+    // never silently land on mock (4 Nov 2026: the reset left Bree's app
+    // echoing "[mock:muse-chat] You said: ..." instead of real Muse).
     let api_key = generate_api_key();
     if let Some(dir) = sidecar_data_dir() {
         cmd.env("MUSE2API_DATA_DIR", dir);
@@ -1121,6 +1135,27 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_driver_defaults_to_browser() {
+        // 4 Nov 2026: a fresh install / settings reset must start the real
+        // browser driver, never the mock echo driver.
+        assert_eq!(resolve_driver(None).unwrap(), "browser");
+        assert_eq!(resolve_driver(Some(String::new())).unwrap(), "browser");
+        assert_eq!(resolve_driver(Some("   ".to_string())).unwrap(), "browser");
+    }
+
+    #[test]
+    fn resolve_driver_keeps_explicit_choice() {
+        assert_eq!(resolve_driver(Some("mock".to_string())).unwrap(), "mock");
+        assert_eq!(resolve_driver(Some("browser".to_string())).unwrap(), "browser");
+        assert_eq!(resolve_driver(Some(" Browser ".to_string())).unwrap(), "browser");
+    }
+
+    #[test]
+    fn resolve_driver_rejects_unknown() {
+        assert!(resolve_driver(Some("playwright".to_string())).is_err());
+    }
 
     #[test]
     fn strip_verbatim_prefix_plain_drive() {

@@ -217,7 +217,11 @@ export const DEFAULT_SETTINGS: Settings = {
   model: "muse-chat",
   workspacePath: "",
   shell: "",
-  driver: "mock",
+  // Default driver: browser (real Muse). Mock only echoes (testing only)
+  // — a fresh install / settings reset must never silently land on mock
+  // (4 Nov 2026). A saved "mock" setting is still honoured; the user
+  // switches it in Settings → Driver.
+  driver: "browser",
 };
 
 export interface FileEntry {

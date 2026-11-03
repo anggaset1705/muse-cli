@@ -5,7 +5,8 @@
 //! Modul ini hanya menyimpan alias nama lama (dipakai `BrowserDriver`,
 //! `DriverFactory`, dan `BrowserConfig`) plus dua helper kecil yang
 //! spesifik driver. Semua nilai tetap dibaca dari env `MUSE2API_*`
-//! dengan default .NET yang sama, lewat `muse_core::Settings::load()`.
+//! lewat `muse_core::Settings::load()` (default driver `browser`
+//! sejak 4 Nov 2026; `mock` hanya bila eksplisit).
 
 /// Alias kompatibilitas: pengaturan driver = `muse-core::Settings`.
 /// Bukan definisi kedua — satu pemilik kanonik di `muse-core`.

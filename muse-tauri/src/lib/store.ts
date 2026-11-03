@@ -107,8 +107,44 @@ export function loadConversations(workspacePath = ""): Conversation[] {
   return list;
 }
 
-export function saveConversations(list: Conversation[], workspacePath = ""): void {
-  writeJson(conversationsKey(workspacePath), list);
+export interface SaveConversationsOptions {
+  /**
+   * The caller explicitly intends to clear the list (user deleted the
+   * last conversation). Without this, an empty list NEVER overwrites a
+   * stored non-empty list — see the guard in saveConversations.
+   */
+  allowEmptyOverwrite?: boolean;
+}
+
+export function saveConversations(
+  list: Conversation[],
+  workspacePath = "",
+  opts: SaveConversationsOptions = {},
+): void {
+  const key = conversationsKey(workspacePath);
+  if (list.length === 0 && !opts.allowEmptyOverwrite) {
+    // Guard (4 Nov 2026 — riwayat "halo apa kabar ?" hilang): the mount
+    // save effect in App.tsx persists whatever the in-memory list holds,
+    // including [] when the startup load spuriously returned nothing
+    // (storage not ready / transient read failure) while a non-empty list
+    // was still stored under this key. An empty write must never destroy
+    // stored history — only an explicit user delete may clear it.
+    // Checked on the RAW stored string, not the parsed value, so even a
+    // corrupt-but-present value is preserved instead of being wiped.
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(key);
+    } catch {
+      raw = null;
+    }
+    if (raw !== null && raw.trim() !== "" && raw.trim() !== "[]") {
+      console.warn(
+        `[muse] saveConversations: menolak menimpa daftar tersimpan dengan [] (key ${key}) — kemungkinan load awal gagal; daftar tersimpan dipertahankan.`,
+      );
+      return;
+    }
+  }
+  writeJson(key, list);
 }
 
 export function loadChanges(): FileChange[] {
