@@ -1,0 +1,43 @@
+[package]
+name = "muse-tauri"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "muse_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `custom-protocol` MUST stay enabled (3 Nov 2026): without it the tauri
+# crate's build script sets the `dev` cfg, and tauri-build then embeds NO
+# frontend assets whenever `devUrl` is set in tauri.conf.json — the built
+# exe silently becomes a dev-mode shell that tries to load the UI from
+# http://localhost:1420 instead of the embedded dist. The Tauri CLI
+# enables this feature for `tauri build`, but a plain `cargo build`
+# does not, so a CLI-less build produced an asset-less exe (19:55,
+# 3 Nov 2026: staged exe had no asset keys, .rdata ~692 KiB smaller).
+# Pinning the feature here makes every build a production build.
+tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

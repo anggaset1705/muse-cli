@@ -1,0 +1,5 @@
+/* Windows resource script for muse-gateway.exe: embed the application
+   manifest (Common Controls v6) so the login window renders themed
+   instead of classic comctl32 v5. CREATEPROCESS_MANIFEST_RESOURCE_ID (1)
+   + RT_MANIFEST (24). Compiled by build.rs via embed-resource. */
+1 24 "muse-gateway.manifest"

@@ -1,0 +1,253 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Muse Tauri — exact palette (from the reference design):
+ * bg #17171D · sidebar/workspace #1D1D26 · chat #22232C ·
+ * secondary #292A34 · border #343541 · accent #3867F5 ·
+ * text #F5F5F7 / #A1A1AA / #71717A. Dark-only.
+ */
+:root {
+  --radius: 0.5rem;
+  --background: #17171d;
+  --foreground: #f5f5f7;
+  --card: #1d1d26;
+  --card-foreground: #f5f5f7;
+  --popover: #1d1d26;
+  --popover-foreground: #f5f5f7;
+  --primary: #3867f5;
+  --primary-foreground: #ffffff;
+  --secondary: #292a34;
+  --secondary-foreground: #f5f5f7;
+  --muted: #292a34;
+  --muted-foreground: #a1a1aa;
+  --accent: #292a34;
+  --accent-foreground: #f5f5f7;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #343541;
+  --input: #343541;
+  --ring: #3867f5;
+}
+
+.dark {
+  --background: #17171d;
+  --foreground: #f5f5f7;
+  --card: #1d1d26;
+  --card-foreground: #f5f5f7;
+  --popover: #1d1d26;
+  --popover-foreground: #f5f5f7;
+  --primary: #3867f5;
+  --primary-foreground: #ffffff;
+  --secondary: #292a34;
+  --secondary-foreground: #f5f5f7;
+  --muted: #292a34;
+  --muted-foreground: #a1a1aa;
+  --accent: #292a34;
+  --accent-foreground: #f5f5f7;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #343541;
+  --input: #343541;
+  --ring: #3867f5;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: Inter, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #343541;
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* --- Light theme (I2, port of DesktopTheme LightPalette) -----------------
+ * The components use hardcoded dark hex utilities (bg-[#17171D] etc.),
+ * so the light theme overrides those generated classes under
+ * `.theme-light` (set on <html> by App). Specificity (0,2,0) beats the
+ * single-class utilities. Palette (DesktopTheme.cs LightPalette):
+ * bg #F8F8FA · sidebar #F2F2F5 · surface #FFFFFF · border #E2E2E8 ·
+ * text #1C1C1E · muted #6E6E73 · accent #2563EB · success #10B981. */
+.theme-light {
+  --background: #f8f8fa;
+  --foreground: #1c1c1e;
+  --card: #f2f2f5;
+  --card-foreground: #1c1c1e;
+  --popover: #ffffff;
+  --popover-foreground: #1c1c1e;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: #ffffff;
+  --secondary-foreground: #1c1c1e;
+  --muted: #f2f2f5;
+  --muted-foreground: #6e6e73;
+  --accent: #e2e2e8;
+  --accent-foreground: #1c1c1e;
+  --border: #e2e2e8;
+  --input: #e2e2e8;
+  --ring: #2563eb;
+}
+.theme-light .bg-\[\#17171D\] { background-color: #f8f8fa; }
+.theme-light .bg-\[\#1D1D26\] { background-color: #f2f2f5; }
+.theme-light .bg-\[\#22232C\] { background-color: #ffffff; }
+.theme-light .bg-\[\#292A34\] { background-color: #ffffff; }
+.theme-light .bg-\[\#343541\] { background-color: #e2e2e8; }
+.theme-light .bg-\[\#3867F5\] { background-color: #2563eb; }
+.theme-light .bg-\[\#3867F5\]\/10 { background-color: rgb(37 99 235 / 0.08); }
+.theme-light .bg-\[\#3867F5\]\/15 { background-color: rgb(37 99 235 / 0.12); }
+.theme-light .bg-\[\#3867F5\]\/20 { background-color: rgb(37 99 235 / 0.15); }
+.theme-light .border-\[\#343541\] { border-color: #e2e2e8; }
+.theme-light .border-\[\#3867F5\] { border-color: #2563eb; }
+.theme-light .border-\[\#3867F5\]\/40 { border-color: rgb(37 99 235 / 0.4); }
+.theme-light .text-\[\#71717A\] { color: #6e6e73; }
+.theme-light .text-\[\#8aa8ff\] { color: #2563eb; }
+.theme-light .text-\[\#A1A1AA\] { color: #52525b; }
+.theme-light .text-\[\#F5A623\] { color: #b45309; }
+.theme-light .text-\[\#F5F5F7\] { color: #1c1c1e; }
+.theme-light .text-\[\#c7d6ff\] { color: #1e40af; }
+.theme-light .accent-\[\#3867F5\] { accent-color: #2563eb; }
+.theme-light .hover\:bg-\[\#292A34\]:hover { background-color: #e8e8ec; }
+.theme-light .hover\:bg-\[\#343541\]:hover { background-color: #e2e2e8; }
+.theme-light .hover\:bg-\[\#2f5ae0\]:hover { background-color: #1d4ed8; }
+.theme-light .hover\:text-white:hover { color: #1c1c1e; }
+.theme-light .placeholder\:text-\[\#71717A\]::placeholder { color: #6e6e73; }
+/* Status colours stay readable on white. */
+.theme-light .text-emerald-300 { color: #047857; }
+.theme-light .text-emerald-400 { color: #047857; }
+.theme-light .bg-emerald-500\/20 { background-color: rgb(16 185 129 / 0.15); }
+.theme-light .border-emerald-500\/40 { border-color: rgb(16 185 129 / 0.4); }
+.theme-light .bg-emerald-500\/10 { background-color: rgb(16 185 129 / 0.1); }
+.theme-light .text-red-300 { color: #b91c1c; }
+.theme-light .text-red-400 { color: #b91c1c; }
+.theme-light .bg-red-500\/10 { background-color: rgb(239 68 68 / 0.08); }
+.theme-light .border-red-500\/40 { border-color: rgb(220 38 38 / 0.4); }
+.theme-light .text-amber-200 { color: #92400e; }
+.theme-light .text-amber-300 { color: #92400e; }
+.theme-light .text-amber-100\/80 { color: rgb(146 64 14 / 0.85); }
+.theme-light .bg-amber-500\/10 { background-color: rgb(245 158 11 / 0.12); }
+.theme-light .border-amber-500\/30 { border-color: rgb(245 158 11 / 0.4); }
+/* Markdown + scrollbars in light mode. */
+.theme-light .md-body .md-code { background: #f2f2f5; border-color: #e2e2e8; }
+.theme-light .md-body .md-pre { background: #f8f8fa; border-color: #e2e2e8; }
+.theme-light .md-body .md-pre-head { color: #6e6e73; border-bottom-color: #e2e2e8; }
+.theme-light .md-body .md-link { color: #2563eb; }
+.theme-light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
+.theme-light .typewriter-cursor { color: #2563eb; animation: blink 1s step-end infinite; }
+
+.typewriter-cursor {
+  color: #8aa8ff;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* --- Minimal markdown styles (MessageView) --- */
+.md-body .md-p {
+  margin: 0 0 0.6em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.md-body .md-p:last-child {
+  margin-bottom: 0;
+}
+.md-body .md-h2 {
+  font-size: 1.1em;
+  font-weight: 700;
+  margin: 0.8em 0 0.4em;
+}
+.md-body .md-h3 {
+  font-size: 1em;
+  font-weight: 700;
+  margin: 0.7em 0 0.35em;
+}
+.md-body .md-ul {
+  margin: 0 0 0.6em 1.1em;
+  list-style: disc;
+}
+.md-body .md-ul li {
+  margin-bottom: 0.25em;
+}
+.md-body .md-code {
+  background: #17171d;
+  border: 1px solid #343541;
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.86em;
+}
+.md-body .md-pre {
+  background: #17171d;
+  border: 1px solid #343541;
+  border-radius: 8px;
+  margin: 0.5em 0 0.8em;
+  overflow: auto;
+}
+.md-body .md-pre-head {
+  padding: 0.4em 0.8em;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #71717a;
+  border-bottom: 1px solid #343541;
+}
+.md-body .md-pre code {
+  display: block;
+  padding: 0.8em;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre;
+}
+.md-body .md-link {
+  color: #8aa8ff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}

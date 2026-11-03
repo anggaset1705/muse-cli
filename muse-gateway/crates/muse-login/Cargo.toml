@@ -1,0 +1,33 @@
+[package]
+name = "muse-login"
+version = "0.9.1"
+edition = "2021"
+description = "Muse sign-in window: WebView2 login on muse.ai, session verification, cookie save to the gateway (Rust port of Muse2Api.WinForms LoginForm)."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# TLS backend differs per platform (Cargo unifies features per target):
+# Windows uses the OS TLS stack (SChannel, like .NET HttpClient) so no C
+# toolchain is needed there; elsewhere rustls is used.
+ureq = { version = "2.12", default-features = false, features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json", "native-tls"] }
+webview2-com = "0.39.1"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+

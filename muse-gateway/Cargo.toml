@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "crates/muse-gateway",
+    "crates/muse-core",
+    "crates/muse-store",
+    "crates/muse-agent",
+    "crates/muse-browser",
+    "crates/muse-login",
+    "crates/muse-screen",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 2

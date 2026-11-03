@@ -1,0 +1,25 @@
+[package]
+name = "muse-store"
+version = "0.9.1"
+edition = "2021"
+description = "Muse store — full Rust port of the Muse2Api (.NET) persistence layer: accounts, API keys, request log, background tasks, media, skills, preferences, chat sessions."
+license = "MIT"
+
+[lib]
+name = "muse_store"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+regex = "1"
+zip = "4"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+

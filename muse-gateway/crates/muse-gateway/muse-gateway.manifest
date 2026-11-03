@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Application manifest for muse-gateway.exe.
+     Pulls in Common Controls v6 (themed controls) so the login window's
+     owner-drawn buttons render with the modern look instead of the
+     classic comctl32 v5 grey bevels. Same content as the embedded
+     resource (muse-gateway.rc); see build.rs.
+     If the exe was built without an embedded manifest (no resource
+     compiler on the build machine), copy THIS file next to the exe as
+     "muse-gateway.exe.manifest" during install — Windows loads the
+     sidecar manifest when no embedded one exists. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="MuseGateway" type="win32"/>
+  <description>Muse gateway (Tauri sidecar)</description>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

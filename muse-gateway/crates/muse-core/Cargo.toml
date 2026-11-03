@@ -1,0 +1,17 @@
+[package]
+name = "muse-core"
+version = "0.9.1"
+edition = "2021"
+description = "Core types for the Muse Rust backend: model registry, prompt flattening, errors, settings, DPAPI. Ported 1:1 from .NET Muse2Api (Models.cs, Errors.cs, Settings.cs, PrivateDataProtection.cs)."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+
