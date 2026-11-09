@@ -319,6 +319,16 @@ function App() {
     try {
       const s = await invoke<BackendStatus>("backend_status");
       setBackend(s);
+      // Persist the sidecar's ACTUAL listening URL: every restart picks
+      // a fresh random port, and the stored default (18610) is stale
+      // after the first launch. Without this, effectiveBase falls back
+      // to the dead port whenever backend.base_url is momentarily null
+      // (backend down), so the next account/usage fetch targets a dead
+      // port. Only the live URL is ever stored — never a guess.
+      if (s.base_url && s.base_url !== settingsRef.current.backendBaseUrl) {
+        const liveBase = s.base_url;
+        setSettings((prev) => ({ ...prev, backendBaseUrl: liveBase }));
+      }
       // Surface the last failure reason reported by Rust, and clear the
       // error once the backend is healthy again.
       if (s.error && !s.running) setBackendError(s.error);
@@ -388,21 +398,66 @@ function App() {
   // Called when the backend becomes healthy and whenever an account may
   // have changed: Settings/LoginDialog close (add / delete / toggle there)
   // and the send gate's own check. NOT on the 5 s backend poll — the
-  // list only changes via those user actions.
+  // list only changes via those user actions, plus the key rotation
+  // below (refreshAccounts' identity changes when settings.apiKey does,
+  // which re-runs the loader effect; the poll itself never calls this).
+  //
+  // BUG (9 Nov 2026): the loader effect used to fire only on the
+  // false→true flip of backendHealthy, at which point settings.apiKey
+  // still held the PREVIOUS launch's key — the fresh key is only picked
+  // up later in refreshBackend, after gatewayHealth resolves. That
+  // first fetch 401'd, the error was swallowed, and nothing ever
+  // re-fetched, so the pill stayed "Not connected" until a manual
+  // dialog close. Fix: refreshAccounts now closes over settings.apiKey
+  // (state, not the ref), so a key rotation re-creates it and the
+  // loader effect below re-runs with the fresh key.
+  //
+  // In-flight guard: at most one /admin/accounts fetch runs at a time.
+  // If a call arrives while one is in flight (e.g. the stale-key fetch
+  // is still running when the key rotates), the LATEST key is remembered
+  // and fetched once the in-flight one lands — a same-key duplicate is
+  // dropped, so dialog closes can never double-fetch.
+  const accountsInFlightRef = useRef(false);
+  const accountsPendingKeyRef = useRef<string | null>(null);
+  const fetchAccountsOnce = useCallback(
+    async (key: string) => {
+      if (accountsInFlightRef.current) {
+        accountsPendingKeyRef.current = key;
+        return;
+      }
+      accountsInFlightRef.current = true;
+      try {
+        const res = await fetchAccounts(effectiveBase, key);
+        setAccounts((unwrapData<GatewayAccount[]>(res) ?? []) as GatewayAccount[]);
+        setAccountsLoaded(true);
+      } catch {
+        /* keep the previous list; a failed load never claims connected */
+      } finally {
+        accountsInFlightRef.current = false;
+        const pending = accountsPendingKeyRef.current;
+        accountsPendingKeyRef.current = null;
+        if (pending && pending !== key) void fetchAccountsOnce(pending);
+      }
+    },
+    [effectiveBase],
+  );
   const refreshAccounts = useCallback(async () => {
-    try {
-      const res = await fetchAccounts(effectiveBase, settingsRef.current.apiKey);
-      setAccounts((unwrapData<GatewayAccount[]>(res) ?? []) as GatewayAccount[]);
-      setAccountsLoaded(true);
-    } catch {
-      /* keep the previous list; a failed load never claims connected */
-    }
-  }, [effectiveBase]);
+    const key = settings.apiKey;
+    // Fail-open: no key yet (fresh install / external gateway without
+    // one) means no fetch — an unauthenticated probe must never be
+    // mistaken for a connection state. The send gate still does its own
+    // fresh check at send time, and dialog closes re-trigger this once
+    // a key exists.
+    if (!key) return;
+    await fetchAccountsOnce(key);
+  }, [settings.apiKey, fetchAccountsOnce]);
 
   // Load the account list once the backend is healthy, so the welcome
   // pill reflects the real connection state from the first paint after
   // startup. backendHealthy is a boolean, so the 5 s backend poll does
-  // not re-trigger this while it stays true.
+  // not re-trigger this while it stays true — but a settings.apiKey
+  // rotation DOES (via refreshAccounts' identity), which is exactly
+  // what heals the stale-key first fetch after every restart.
   useEffect(() => {
     if (!backendHealthy) return;
     void refreshAccounts();
