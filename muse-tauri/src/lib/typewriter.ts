@@ -1,56 +1,72 @@
-// Typewriter engine (A3, port of WinForms ChatTranscript: 16 ms tick,
-// 3 chars/tick). Pure functions — no React — so the tick logic can be
+// Typewriter engine (A3, port of WinForms ChatTranscript: 24 ms tick,
+// 1-4 chars/tick). Pure functions — no React — so the tick logic can be
 // unit-tested in Node; ChatPanel's interval just calls typewriterStep().
 //
-// The displayed text chases the target text. Two rules:
+// MIRROR: typewriter.js next to this file is the copy Vite bundles
+// (`@/lib/typewriter` resolves to the .js first) — any change here MUST
+// be mirrored there, or the shipped app silently runs different logic
+// than the tests exercise.
 //
-// 1. Never cut inside an unclosed code fence. An odd count of ``` in the
-//    cut means we are inside a fence, so hold at the fence opener until
-//    the fence closes and the markdown render never breaks mid-block.
-// 2. The animation finishes when displayed has caught up with the
+// The displayed text chases the target text. Rules (13 Nov 2026 fix):
+//
+// 1. The chase types THROUGH code fences, character by character —
+//    it never holds at a fence opener and never jumps a whole block in
+//    at once. (The old rule held at the opener until the fence closed
+//    and then brought the whole block in at once: a reply whose code
+//    block arrived in a single delta therefore appeared whole in one
+//    tick — Bree's 18:31 live test: the 1584-char reply finished in
+//    25 ticks = 0.40 s with a 1383-char single-tick jump.) MessageView
+//    splits on ``` and renders a partial fence as a CodeBlock with the
+//    partial code, so typing mid-block never breaks the render.
+// 2. Step sizes stay small enough to stay visibly live: a ~1000-char
+//    reply takes several seconds to type out, not ~1 s; a ~6 KB file
+//    still finishes in seconds, not minutes. See typewriterStepSize.
+// 3. The animation finishes when displayed has caught up with the
 //    target — NOT when the streaming flag flips. The agent often delivers
 //    a whole reply in a single delta and finish() fires right after, so
-//    stopping on the flag would make the reply appear all at once. A cut
-//    held at a fence opener waits while the fence is still open in the
-//    target; once the fence has closed further along, the whole block
-//    comes in at once and typing continues after it — never mid-block,
-//    and never stuck: the cut window alone can never see the closing
-//    fence, so the hold is always judged against the full target. When
-//    the turn is over and the fence never closes, the full text is shown
-//    rather than truncating the reply forever.
+//    stopping on the flag would make the reply appear all at once.
+
+export const TYPEWRITER_TICK_MS = 24;
 
 export function fenceCount(text: string): number {
   return (text.match(/```/g) ?? []).length;
 }
 
+/** Cut `target` to `n` chars, backing off a trailing run of exactly
+ * 1–2 backticks so displayed never ends on a partial ``` marker.
+ * (Kept as a helper; the engine no longer holds at fence openers.) */
 export function safeCut(target: string, n: number): string {
   let cut = target.slice(0, n);
-  if (fenceCount(cut) % 2 === 1) {
-    const last = cut.lastIndexOf("```");
-    // Hold at the fence opener (last === 0 counts too: a reply that
-    // starts with a code block shows nothing until the fence closes).
-    if (last >= 0) cut = cut.slice(0, last);
-  }
-  // A cut can also end 1–2 chars into a fence opener (a 3-char step
-  // lands on a partial ```). Without this, displayed would end with a
-  // lone backtick and the next cut would hold BEFORE it forever — the
-  // animation deadlocks, because the cut window is anchored at the
-  // stuck position and never grows past the fence. Back off past the
-  // partial marker; only a run of exactly 1–2 is trimmed, a run of 3+
-  // is a complete fence marker and stays.
   let trailing = 0;
   while (trailing < cut.length && cut[cut.length - 1 - trailing] === "`") trailing++;
   if (trailing === 1 || trailing === 2) cut = cut.slice(0, cut.length - trailing);
   return cut;
 }
 
-/** Chars added per 16 ms tick. 3 chars/tick like muse.exe, so a ~90 char
- * reply takes ~0.5 s to type out and stays visibly live; catch up
- * faster when far behind so a long reply does not take minutes. */
+/** Chars added per 24 ms tick. 1-4 chars/tick like muse.exe, so a ~90 char
+ * reply takes ~0.5 s to type out and stays visibly live; the catch-up
+ * tiers stay small on purpose — a ~1000-char reply must take several
+ * visible seconds, not ~1 s (the old 30/60 tiers finished a 1584-char
+ * reply in 0.40 s). A ~6 KB file types out in ~8 s at the top tier. */
 export function typewriterStepSize(gap: number): number {
-  if (gap > 2000) return 60;
-  if (gap > 600) return 30;
-  return 3;
+  if (gap > 2000) return 4;
+  if (gap > 600) return 2;
+  return 1;
+}
+
+/**
+ * One 16 ms tick of the live code typing inside a "Ran ..." card (13 Nov
+ * 2026). Same chase as typewriterStep: the target is raw file content,
+ * not markdown, so there is no fence to hold at — plain prefix growth.
+ * Step sizes are the same tiers as typewriterStepSize, so a ~6 KB file
+ * types out in ~8 s and stays visibly live instead of appearing whole;
+ * a far-behind target still catches up instead of taking minutes.
+ */
+export function liveContentStep(target: string, current: string): string {
+  if (current.length >= target.length) return current;
+  if (current.length > 0 && !target.startsWith(current)) return target;
+  const next = current.length + typewriterStepSize(target.length - current.length);
+  return target.slice(0, Math.min(next, target.length));
 }
 
 /**
@@ -62,25 +78,17 @@ export function typewriterStepSize(gap: number): number {
  *   (or ""), otherwise the target was replaced mid-turn (e.g. a fallback
  *   note prepended at finish) and we jump to the full target rather than
  *   show a garbled mix.
- * - Returns `current` unchanged when the animation must wait (held at an
- *   unclosed fence while still streaming) or is already done.
+ * - The chase types straight through code fences: every tick adds at
+ *   most one step (3–12 chars), so a fenced code block grows
+ *   progressively instead of appearing whole. `_streaming` is kept only
+ *   for signature compatibility with the old callers.
  */
-export function typewriterStep(target: string, current: string, streaming: boolean): string {
+export function typewriterStep(target: string, current: string, _streaming: boolean): string {
+  void _streaming;
+  // A provisional step may be replaced by the assistant final message.
+  // Drop the stale prefix; subsequent ticks type the new text normally.
+  if (current.length > 0 && !target.startsWith(current)) return "";
   if (current.length >= target.length) return current;
-  if (current.length > 0 && !target.startsWith(current)) return target;
   const gap = target.length - current.length;
-  const next = safeCut(target, current.length + typewriterStepSize(gap));
-  if (next.length > current.length) return next;
-  // Held at a fence opener. The cut window (current + one step) never
-  // reaches the closing fence, so "wait for the fence to close" has to
-  // be judged against the FULL target, not the window: if the fence has
-  // closed further along, bring the whole block in at once and keep
-  // typing after it. If it has not closed yet, wait while streaming;
-  // once the turn is over it never closes, so show the full text rather
-  // than truncating the reply forever.
-  const opener = target.indexOf("```", current.length);
-  if (opener === -1) return target;
-  const closer = target.indexOf("```", opener + 3);
-  if (closer !== -1) return target.slice(0, closer + 3);
-  return streaming ? current : target;
+  return target.slice(0, current.length + typewriterStepSize(gap));
 }

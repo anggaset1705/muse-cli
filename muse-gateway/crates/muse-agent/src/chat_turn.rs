@@ -677,6 +677,36 @@ async fn run_turn_inner(
                             declined = true;
                             "error: user declined this step. Do not retry this action unless the user explicitly requests it.".to_string()
                         } else {
+                            // Live-typed code in the "Ran ..." card (13 Nov
+                            // 2026, Bree: the code must be typed live inside
+                            // the card, coloured like VS Code). Stream the
+                            // verified after-text of a file write/edit as
+                            // `tool_content` chunks BEFORE the write
+                            // executes, so the UI can type it out live
+                            // while the tool runs. `prepared.new_text` is
+                            // the after-text for both write_file (args
+                            // content) and edit_file (edits applied). The
+                            // file itself is still written atomically by
+                            // execute_prepared below; the card typing is
+                            // the visible form of that write (SSE has no
+                            // backpressure to delay the write until the UI
+                            // finished typing).
+                            if matches!(call.name.as_str(), "write_file" | "edit_file") {
+                                if let Some(content) = prepared.new_text.as_deref() {
+                                    let mut start = 0usize;
+                                    while start < content.len() {
+                                        let mut end = (start + 4000).min(content.len());
+                                        while !content.is_char_boundary(end) {
+                                            end -= 1;
+                                        }
+                                        obs.emit(
+                                            AgentEvent::new("tool_content", &content[start..end])
+                                                .with_tool(call.name.clone(), path.clone()),
+                                        );
+                                        start = end;
+                                    }
+                                }
+                            }
                             let output_sink = &mut |chunk: &str| {
                                 obs.sink.emit(AgentEvent::new("command_output", chunk).with_tool(call.name.clone(), path.clone()));
                             };

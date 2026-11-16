@@ -1,0 +1,26 @@
+Ini script kalkulator sederhananya, Angga. Simpan sebagai kalkulator.py:
+
+python
+
+
+
+```
+# Kalkulator sederhana# Cara jalanin: python kalkulator.py
+def tambah(a, b):    return a + b
+def kurang(a, b):    return a - b
+def kali(a, b):    return a * b
+def bagi(a, b):    if b == 0:        return "Tidak bisa dibagi 0!"    return a / b
+def baca_angka(pesan):    while True:        try:            return float(input(pesan))        except ValueError:            print("Masukkan angka yang benar, ya.")
+def main():    while True:        print("\n=== Kalkulator Sederhana ===")        print("1. Tambah")        print("2. Kurang")        print("3. Kali")        print("4. Bagi")        print("5. Keluar")
+        pilihan = input("Pilih (1-5): ")
+        if pilihan == "5":            print("Sampai jumpa!")            break
+        if pilihan not in ["1", "2", "3", "4"]:            print("Pilihan tidak valid.")            continue
+        a = baca_angka("Masukkan angka pertama: ")        b = baca_angka("Masukkan angka kedua: ")
+        if pilihan == "1":            hasil = tambah(a, b)        elif pilihan == "2":            hasil = kurang(a, b)        elif pilihan == "3":            hasil = kali(a, b)        else:            hasil = bagi(a, b)
+        print(f"Hasil: {hasil}")
+if __name__ == "__main__":    main()
+```
+
+
+
+Cara menjalankannya: python kalkulator.py, lalu pilih 1 untuk tambah, 2 untuk kurang, 3 untuk kali, 4 untuk bagi, dan 5 untuk keluar.

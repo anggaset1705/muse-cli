@@ -46,6 +46,7 @@ import { detectReplyLanguage, t } from "@/lib/i18n";
 import { streamingReplyDisplay, unwrapReplyEnvelope } from "@/lib/replyEnvelope";
 import { friendlyError } from "@/lib/friendlyErrors";
 import { activityLine } from "@/lib/toolSummaries";
+import { parseExitCode } from "@/lib/ranCard";
 import { checkForUpdates, dismissUpdate, getDismissedVersion, isTrustedUpdateLink, type AvailableUpdate } from "@/lib/updates";
 import { DialogPluginMissingError, pickFolder } from "@/lib/dialog";
 import {
@@ -967,7 +968,13 @@ function App() {
           const markTool = (tool: string, status: ToolActionState["status"], result?: string) => {
             for (let i = actions.length - 1; i >= 0; i--) {
               if (actions[i].tool === tool && (actions[i].status === "running" || actions[i].status === "pending")) {
-                actions[i] = { ...actions[i], status, ...(result !== undefined ? { result } : {}) };
+                actions[i] = {
+                  ...actions[i],
+                  status,
+                  ...(result !== undefined
+                    ? { result, ...(parseExitCode(result) !== undefined ? { exitCode: parseExitCode(result) } : {}) }
+                    : {}),
+                };
                 pushActions();
                 return;
               }
@@ -993,10 +1000,19 @@ function App() {
                     }
                     break;
                   case "assistant":
-                    if (ev.text) {
-                      full = ev.text;
-                      setStreamingText(streamingReplyDisplay(full));
-                    }
+                    // The gateway's `visible` text for this step is
+                    // authoritative: replace the accumulated raw deltas
+                    // even when it is empty. The raw deltas can contain
+                    // a tool-call JSON block that streamed in; the
+                    // step's `visible` text has it stripped, so
+                    // resetting unconditionally clears a flashed
+                    // protocol block at the step boundary instead of
+                    // letting it linger into the saved message. (The old
+                    // `if (ev.text)` guard skipped the reset exactly
+                    // when `visible` was empty — i.e. exactly when the
+                    // step was a pure tool-call reply.)
+                    full = ev.text ?? "";
+                    setStreamingText(streamingReplyDisplay(full));
                     break;
                   case "tool_start":
                     actions.push({
@@ -1012,6 +1028,27 @@ function App() {
                     for (let i = actions.length - 1; i >= 0; i--) {
                       if (actions[i].tool === "run_command" && actions[i].status === "running") {
                         actions[i] = { ...actions[i], result: (actions[i].result ?? "") + (ev.text ?? "") };
+                        pushActions();
+                        break;
+                      }
+                    }
+                    break;
+                  case "tool_content":
+                    // Live-typed code for a write/edit card (13 Nov 2026):
+                    // the gateway streams the file's after-text in
+                    // chunks before the write executes; the card types
+                    // it out live. Append to the running action with
+                    // the same tool (+path when the event carries one).
+                    for (let i = actions.length - 1; i >= 0; i--) {
+                      if (
+                        actions[i].tool === (ev.tool ?? "tool") &&
+                        actions[i].status === "running" &&
+                        (ev.path === undefined || actions[i].path === ev.path)
+                      ) {
+                        actions[i] = {
+                          ...actions[i],
+                          content: (actions[i].content ?? "") + (ev.text ?? ""),
+                        };
                         pushActions();
                         break;
                       }

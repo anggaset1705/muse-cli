@@ -1,9 +1,9 @@
 // Center chat panel: header, message list, composer.
 // Typewriter animation (A3, port of ChatTranscript.cs StartStream —
-// 16 ms tick, 3 chars/tick, cursor ▊), thinking card (A4),
+// 24 ms tick, 1/2/4 chars/tick, cursor ▊), thinking card (A4),
 // Stop button (A12), welcome screen (A17), friendly tool cards (A5),
 // notice cards (A6), stick-to-bottom (A11), paste/drag-drop images (K3).
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   Brain,
@@ -33,8 +33,12 @@ import type {
 } from "@/lib/types";
 import { formatTime } from "@/lib/types";
 import { t, tf, type Lang } from "@/lib/i18n";
-import { typewriterStep } from "@/lib/typewriter";
+import { typewriterStep, liveContentStep, TYPEWRITER_TICK_MS } from "@/lib/typewriter";
+import { highlightCode, langFromPath, detectLang } from "@/lib/highlight";
 import { toolIcon, toolSummary } from "@/lib/toolSummaries";
+import { ranCommandLine, ranTitle, shouldShowRanOutput } from "@/lib/ranCard";
+import { reconcileScrollFollow } from "@/lib/scrollFollow";
+import { ranCodeSequence, shouldDeferRanCards } from "@/lib/ranSequence";
 import { MessageView } from "./MessageView";
 
 interface Props {
@@ -101,175 +105,330 @@ function statusColor(status: ToolActionState["status"]): string {
   }
 }
 
-/** Thinking card ala Codex (A4): title + live timer, thought list,
- * auto-collapsed once done ("Thought for Xs"), click to fold/unfold. */
+/** Thinking indicator, plain status line (Hermes round, 13 Nov 2026 —
+ * Bree: no "Berpikir…" text, no collapse chevron, no thought list; and
+ * 13 Nov 16:29: no card wrapper either — just the Brain icon +
+ * "Thought for Xs" as plain text, no background, no border). A live
+ * timer while the turn runs, the final seconds once it is done. */
 function ThinkingCard({
-  thoughts,
   lang,
   running,
   startedAt,
   doneSeconds,
 }: {
-  thoughts: string[];
   lang: Lang;
   running: boolean;
   startedAt: number | null;
   doneSeconds?: number;
 }) {
-  const [open, setOpen] = useState(true);
   const [now, setNow] = useState(Date.now());
-  // Auto-collapse when the turn finishes, like ThinkingCard.Complete().
-  const wasRunning = useRef(running);
-  useEffect(() => {
-    if (wasRunning.current && !running) setOpen(false);
-    wasRunning.current = running;
-  }, [running]);
   useEffect(() => {
     if (!running) return;
-    const t = window.setInterval(() => setNow(Date.now()), 100);
-    return () => window.clearInterval(t);
+    const id = window.setInterval(() => setNow(Date.now()), 100);
+    return () => window.clearInterval(id);
   }, [running]);
   const seconds = doneSeconds ?? (startedAt ? Math.max(0, (now - startedAt) / 1000) : 0);
-  const last = thoughts.length > 0 ? thoughts[thoughts.length - 1] : null;
   return (
-    <div className="mb-2 overflow-hidden rounded-lg border border-[#343541] bg-[#17171D]" role="group" aria-label={t(lang, "thinkingTitle")}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-[#A1A1AA] hover:text-white"
-        aria-expanded={open}
-      >
-        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        <Brain className="h-4 w-4 text-[#8aa8ff]" />
-        <span>
-          {running
-            ? `${t(lang, "thinkingTitle")}… ${seconds.toFixed(1)}s`
-            : tf(lang, "thoughtFor", seconds.toFixed(1))}
-        </span>
-        {running && <span className="h-2 w-2 animate-pulse rounded-full bg-[#3867F5]" />}
-        {last && !open && <span className="min-w-0 flex-1 truncate text-[11px] text-[#71717A]">{last}</span>}
-      </button>
-      {open && thoughts.length > 0 && (
-        <ul className="space-y-1 border-t border-[#343541] px-3 py-2">
-          {thoughts.map((th, i) => (
-            <li key={i} className="text-[12px] leading-relaxed text-[#A1A1AA]">
-              <span className="mr-1.5 text-[#71717A]">›</span>
-              {th}
-            </li>
-          ))}
-        </ul>
-      )}
+    <div className="mb-2 flex items-center gap-2 text-[12px] font-medium text-[#A1A1AA]" role="group" aria-label={tf(lang, "thoughtFor", seconds.toFixed(1))}>
+      <Brain className="h-4 w-4 shrink-0 text-[#8aa8ff]" />
+      <span>{tf(lang, "thoughtFor", seconds.toFixed(1))}</span>
+      {running && <span className="h-2 w-2 animate-pulse rounded-full bg-[#3867F5]" />}
     </div>
   );
 }
 
-/** Actions executed by the agent loop — live status per action, with
- * Approve/Deny buttons while an action waits for approval (Ask mode)
- * plus "Stop turn" (J1) and a "View terminal" link for commands (A5). */
-function AgentActionsSection({
-  actions,
+/** File content being written, typed live inside the Ran card (13 Nov
+ * 2026 — Bree: the code must be typed live, in the card, coloured like
+ * VS Code). The content target grows as `tool_content` chunks arrive;
+ * the displayed prefix chases it at 24 ms ticks (liveContentStep —
+ * plain prefix chase, no fence rules: the target is raw code).
+ * Highlighting re-runs on the displayed prefix each tick via the same
+ * escape-first tokenizer as MessageView, so colours appear as the code
+ * is typed. The interval keeps running until displayed has caught up
+ * with the target — it is NOT stopped when the turn finishes, so the
+ * card never jumps the remaining code in all at once when the live
+ * props hand over to the saved message. A saved message (live=false)
+ * starts with the full content already displayed. */
+function LiveCode({
+  content,
+  path,
   lang,
+  live,
+  animateFromEmpty = false,
+}: {
+  content: string;
+  path?: string;
+  lang: Lang;
+  live: boolean;
+  animateFromEmpty?: boolean;
+}) {
+  const [displayed, setDisplayed] = useState(() => (live || animateFromEmpty ? "" : content));
+  const [copied, setCopied] = useState(false);
+  // Keep the caret visible inside the capped code window as it types.
+  // A deliberate upward scroll pauses following until the user returns
+  // to the bottom of this code window.
+  const codePreRef = useRef<HTMLPreElement>(null);
+  const followCodeRef = useRef(true);
+  const manualCodeScrollRef = useRef(false);
+  const onCodeScroll = () => {
+    const el = codePreRef.current;
+    if (!el) return;
+    followCodeRef.current = reconcileScrollFollow(
+      followCodeRef.current, manualCodeScrollRef.current, el, 32,
+    );
+    manualCodeScrollRef.current = false;
+  };
+  useLayoutEffect(() => {
+    const el = codePreRef.current;
+    if (el && followCodeRef.current) el.scrollTop = el.scrollHeight;
+  }, [displayed]);
+  // Unknown extension (or none): guess the language from the content so
+  // the code is still coloured (same fallback as MessageView's CodeBlock).
+  const codeLang = langFromPath(path) || detectLang(content);
+  const targetRef = useRef(content);
+  targetRef.current = content;
+  const displayedRef = useRef(displayed);
+  displayedRef.current = displayed;
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const target = targetRef.current;
+      const cur = displayedRef.current;
+      if (cur.length >= target.length) {
+        window.clearInterval(id);
+        return;
+      }
+      const next = liveContentStep(target, cur);
+      if (next.length <= cur.length) return;
+      displayedRef.current = next;
+      setDisplayed(next);
+    }, TYPEWRITER_TICK_MS);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const html = useMemo(() => highlightCode(displayed, codeLang), [displayed, codeLang]);
+  const typing = displayed.length < content.length;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable */
+    }
+  };
+  return (
+    <div className="border-t border-[#343541] px-3 py-2">
+      <div className="md-body">
+        <div className="md-code-shell">
+          <div className="md-pre-head">
+            <span>{codeLang || "code"}</span>
+            <button
+              type="button"
+              onClick={copy}
+              className="md-copy-btn"
+              title={t(lang, "copyCode")}
+              aria-label={t(lang, "copyCode")}
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied ? t(lang, "copied") : ""}
+            </button>
+          </div>
+        <pre
+          ref={codePreRef}
+          className="md-pre md-code-scroll"
+          style={{ maxHeight: "24rem" }}
+          tabIndex={0}
+          onScroll={onCodeScroll}
+          onWheel={(e) => {
+            e.stopPropagation(); // Nested code scroll must not pause chat scroll.
+            manualCodeScrollRef.current = true;
+            if (e.deltaY < 0) followCodeRef.current = false;
+          }}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            if (e.clientX >= e.currentTarget.getBoundingClientRect().right - 18) {
+              manualCodeScrollRef.current = true;
+              followCodeRef.current = false;
+            }
+          }}
+          onTouchMove={(e) => {
+            e.stopPropagation();
+            manualCodeScrollRef.current = true;
+            followCodeRef.current = false;
+          }}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (["ArrowUp", "PageUp", "Home"].includes(e.key)) followCodeRef.current = false;
+            if (["ArrowUp", "PageUp", "Home", "ArrowDown", "PageDown", "End"].includes(e.key)) {
+              manualCodeScrollRef.current = true;
+            }
+          }}
+        >
+          <code
+            dangerouslySetInnerHTML={{
+              __html: typing ? `${html}<span class="typewriter-cursor">▊</span>` : html,
+            }}
+          />
+        </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** One "Ran …" card per tool call (Hermes pattern): the tool/command in
+ * the title, an exit/status badge on the right, the command or arguments
+ * visible underneath, and the output behind a toggle. Renders as a flat
+ * list — no "Agent Actions (n)" group wrapper — so each card appears
+ * progressively, in execution order, while the turn streams. Approval
+ * behaviour (Approve/Deny, Stop turn, View terminal) is unchanged.
+ * `live` is true while the card renders from the streaming actions: the
+ * file content then types out live; a saved message shows it at once. */
+function RanCard({
+  a,
+  lang,
+  live,
+  animateCode,
+  deferCode,
   pendingApproval,
   onApprove,
   onAbortApproval,
   onViewTerminal,
 }: {
-  actions: ToolActionState[];
+  a: ToolActionState;
   lang: Lang;
+  /** True while this card renders from the live streaming actions. */
+  live: boolean;
+  /** Code of the current turn types from empty even after the tool finishes. */
+  animateCode: boolean;
+  /** Wait until the assistant has finished typing the final prose. */
+  deferCode: boolean;
   pendingApproval: PendingApproval | null;
   onApprove: (approvalId: string, approved: boolean) => void;
   onAbortApproval: (approvalId: string) => void;
   onViewTerminal: () => void;
 }) {
+  const done = a.status === "done" || a.status === "error";
+  const summary = toolSummary(a.tool, a.path, a.description, done, lang);
+  const title = ranTitle(a.tool, a.description);
+  const cmdLine = ranCommandLine(a.tool, a.description, a.path);
+  const showCmdLine = cmdLine !== "" && cmdLine !== title.replace(/^Ran /, "");
+  const visibleResult = shouldShowRanOutput(a.tool, a.status, a.result) ? a.result : undefined;
+  const hasOutput = Boolean(a.preview || visibleResult);
+  // Output starts open (Hermes shows the output under the card); the
+  // header chevron closes it. Mounted while the call is running, so the
+  // live output grows in place as command_output chunks arrive.
   const [open, setOpen] = useState(true);
+  const badge = (() => {
+    switch (a.status) {
+      case "done":
+        return a.exitCode !== undefined ? (
+          <span className="shrink-0 rounded bg-emerald-500/20 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-emerald-300">
+            exit {a.exitCode}
+          </span>
+        ) : (
+          <span className={`shrink-0 text-[11px] font-medium ${statusColor(a.status)}`}>{t(lang, "agentDone")}</span>
+        );
+      case "error":
+        return (
+          <span className="shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-red-300">
+            {a.exitCode !== undefined ? `exit ${a.exitCode}` : "error"}
+          </span>
+        );
+      case "awaiting_approval":
+        return (
+          <span className={`shrink-0 text-[11px] font-medium ${statusColor(a.status)}`}>
+            {t(lang, "agentAwaitingApproval")}
+          </span>
+        );
+      case "denied":
+        return (
+          <span className={`shrink-0 text-[11px] font-medium ${statusColor(a.status)}`}>{t(lang, "agentDenied")}</span>
+        );
+      case "running":
+        return (
+          <span className={`flex shrink-0 items-center gap-1.5 text-[11px] font-medium ${statusColor(a.status)}`}>
+            <span className="h-2 w-2 animate-pulse rounded-full bg-[#3867F5]" />
+            {t(lang, "agentRunning")}
+          </span>
+        );
+      default:
+        return (
+          <span className={`shrink-0 text-[11px] font-medium ${statusColor(a.status)}`}>{a.status}</span>
+        );
+    }
+  })();
   return (
-    <div className="mt-2 overflow-hidden rounded-lg border border-[#343541] bg-[#17171D]">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-[#A1A1AA] hover:text-white"
-        aria-expanded={open}
-      >
-        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-        <TerminalSquare className="h-4 w-4" />
-        {t(lang, "agentActions")} ({actions.length})
-        <span className="ml-auto rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
-          {t(lang, "liveBadge")}
-        </span>
-      </button>
-      {open && (
-        <div className="border-t border-[#343541] px-3 py-2">
-          <p className="mb-2 text-[11px] text-[#71717A]">{t(lang, "agentActionsNote")}</p>
-          <ul className="space-y-1.5">
-            {actions.map((a, i) => {
-              const done = a.status === "done" || a.status === "error";
-              const summary = toolSummary(a.tool, a.path, a.description, done, lang);
-              const showDesc = a.description && a.description !== summary;
-              return (
-                <li key={`${a.tool}-${i}`} className="rounded-md border border-[#343541] bg-[#292A34] px-2.5 py-2">
-                  <div className="flex items-center gap-2">
-                    <span aria-hidden className="text-[13px]">{toolIcon(a.tool)}</span>
-                    <span className="min-w-0 flex-1 truncate text-[12px] text-[#F5F5F7]">{summary}</span>
-                    <span className={`shrink-0 text-[11px] font-medium ${statusColor(a.status)}`}>
-                      {a.status === "running"
-                        ? t(lang, "agentRunning")
-                        : a.status === "awaiting_approval"
-                          ? t(lang, "agentAwaitingApproval")
-                          : a.status === "done"
-                            ? t(lang, "agentDone")
-                            : a.status === "denied"
-                              ? t(lang, "agentDenied")
-                              : a.status}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 flex items-center gap-2 pl-6 text-[11px] text-[#71717A]">
-                    <span className="font-mono">{a.tool}</span>
-                    {a.path && <span className="min-w-0 flex-1 truncate font-mono">{a.path}</span>}
-                  </div>
-                  {showDesc && <p className="mt-1 pl-6 text-[11px] leading-relaxed text-[#A1A1AA]">{a.description}</p>}
-                  {a.preview && (
-                    <div className="mt-1.5 pl-6">
-                      <p className="mb-1 text-[11px] font-medium text-[#A1A1AA]">{t(lang, "toolPreview")}</p>
-                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]">
-                        {a.preview.slice(0, 4000)}
-                      </pre>
-                    </div>
-                  )}
-                  {a.result && (
-                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap pl-6 font-mono text-[11px] leading-relaxed text-[#71717A]">
-                      {a.result.slice(0, 2000)}
-                    </pre>
-                  )}
-                  <div className="mt-1.5 flex gap-2 pl-6">
-                    {a.tool.toLowerCase().startsWith("run_command") && (
-                      <button onClick={onViewTerminal} className="text-[11px] font-medium text-[#8aa8ff] hover:text-white">
-                        {t(lang, "viewTerminal")} →
-                      </button>
-                    )}
-                    {a.status === "awaiting_approval" && pendingApproval?.approvalId === a.approvalId && (
-                      <>
-                        <Button size="sm" className="h-7 bg-emerald-600 text-white hover:bg-emerald-500" onClick={() => onApprove(a.approvalId!, true)}>
-                          {t(lang, "approve")}
-                        </Button>
-                        <Button size="sm" variant="outline" className="h-7 border-[#343541] text-[#A1A1AA]" onClick={() => onApprove(a.approvalId!, false)}>
-                          {t(lang, "deny")}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 border-red-500/40 text-red-300 hover:bg-red-500/10"
-                          onClick={() => onAbortApproval(a.approvalId!)}
-                          title={t(lang, "abortTurn")}
-                        >
-                          {t(lang, "abortTurn")}
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+    <div className="mt-2 overflow-visible rounded-lg border border-[#343541] bg-[#17171D]">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <span aria-hidden className="shrink-0 text-[13px]">{toolIcon(a.tool)}</span>
+        <span className="min-w-0 flex-1 break-words font-mono text-[12px] text-[#F5F5F7]">{title}</span>
+        {hasOutput && (
+          <button
+            onClick={() => setOpen(!open)}
+            className="shrink-0 text-[#71717A] hover:text-white"
+            title={open ? t(lang, "hideOutput") : t(lang, "showOutput")}
+            aria-expanded={open}
+            aria-label={open ? t(lang, "hideOutput") : t(lang, "showOutput")}
+          >
+            {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          </button>
+        )}
+        {badge}
+      </div>
+      {(showCmdLine || summary !== title) && (
+        <div className="border-t border-[#343541] px-3 py-1.5 text-[11px] leading-relaxed text-[#A1A1AA]">
+          {showCmdLine && <p className="break-words font-mono text-[#71717A]">{cmdLine}</p>}
+          {summary !== title && <p>{summary}</p>}
         </div>
       )}
+      {a.content && !deferCode ? <LiveCode content={a.content} path={a.path} lang={lang} live={live} animateFromEmpty={animateCode} /> : null}
+      {open && hasOutput && (
+        <div className="border-t border-[#343541] px-3 py-2">
+          {a.preview && (
+            <div>
+              <p className="mb-1 text-[11px] font-medium text-[#A1A1AA]">{t(lang, "toolPreview")}</p>
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]">
+                {a.preview.slice(0, 4000)}
+              </pre>
+            </div>
+          )}
+          {visibleResult && (
+            <div className={a.preview ? "mt-2" : ""}>
+              <p className="mb-1 text-[11px] font-medium text-[#A1A1AA]">{t(lang, "toolOutput")}</p>
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]">
+                {visibleResult.slice(0, 4000)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+      <div className="flex gap-2 px-3 pb-2">
+        {a.tool.toLowerCase().startsWith("run_command") && (
+          <button onClick={onViewTerminal} className="text-[11px] font-medium text-[#8aa8ff] hover:text-white">
+            {t(lang, "viewTerminal")} →
+          </button>
+        )}
+        {a.status === "awaiting_approval" && pendingApproval?.approvalId === a.approvalId && (
+          <>
+            <Button size="sm" className="h-7 bg-emerald-600 text-white hover:bg-emerald-500" onClick={() => onApprove(a.approvalId!, true)}>
+              {t(lang, "approve")}
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 border-[#343541] text-[#A1A1AA]" onClick={() => onApprove(a.approvalId!, false)}>
+              {t(lang, "deny")}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 border-red-500/40 text-red-300 hover:bg-red-500/10"
+              onClick={() => onAbortApproval(a.approvalId!)}
+              title={t(lang, "abortTurn")}
+            >
+              {t(lang, "abortTurn")}
+            </Button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -327,6 +486,8 @@ function MessageRow({
   lang,
   isStreamingTarget,
   isTypingTarget,
+  sequenceRanCode,
+  typingTarget,
   streamingText,
   streamingPlan,
   streamingActions,
@@ -349,6 +510,9 @@ function MessageRow({
    * must take over immediately (otherwise the tool cards would flicker
    * away during the catch-up typing). */
   isTypingTarget: boolean;
+  /** This is the latest active assistant turn, including after finish. */
+  sequenceRanCode: boolean;
+  typingTarget: string;
   streamingText: string;
   streamingPlan: ToolPlanAction[] | null;
   streamingActions: ToolActionState[] | null;
@@ -368,6 +532,10 @@ function MessageRow({
   const actions = isStreamingTarget ? streamingActions : msg.agentActions;
   const thoughts = isStreamingTarget ? streamingThoughts : (msg.thoughts ?? []);
   const isUser = msg.role === "user";
+  const ranPlayback = ranCodeSequence(sequenceRanCode, isStreamingTarget, isTypingTarget);
+  const deferRanCards = shouldDeferRanCards(
+    sequenceRanCode, isStreamingTarget, isTypingTarget, Boolean(pendingApproval),
+  );
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(content);
@@ -385,7 +553,7 @@ function MessageRow({
           <div className="mb-1 flex items-center gap-2 text-[12px] text-[#A1A1AA]">
             <User className="h-3.5 w-3.5" /> {t(lang, "you")} · {formatTime(msg.createdAt)}
           </div>
-          <MessageView content={content} />
+          <MessageView content={content} lang={lang} />
           {msg.attachments && msg.attachments.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {msg.attachments.map((a, i) =>
@@ -417,7 +585,6 @@ function MessageRow({
       <div className="pl-9 pt-1.5 text-[14px] leading-relaxed text-[#F5F5F7]">
         {(thoughts.length > 0 || isStreamingTarget) && (
           <ThinkingCard
-            thoughts={thoughts}
             lang={lang}
             running={isStreamingTarget}
             startedAt={isStreamingTarget ? turnStartedAt : null}
@@ -431,22 +598,29 @@ function MessageRow({
         ) : (
           <>
             {msg.turnStatus && <NoticeCard msg={msg} lang={lang} />}
-            <MessageView content={content} />
+            <MessageView content={content} lang={lang} stripFences typingTarget={isTypingTarget ? typingTarget : undefined} />
             {isTypingTarget && showCursor && (
               <span className="typewriter-cursor" aria-hidden>▊</span>
             )}
           </>
         )}
-        {actions && actions.length > 0 && (
-          <AgentActionsSection
-            actions={actions}
-            lang={lang}
-            pendingApproval={pendingApproval}
-            onApprove={onApprove}
-            onAbortApproval={onAbortApproval}
-            onViewTerminal={onViewTerminal}
-          />
-        )}
+        {actions &&
+          !deferRanCards &&
+          actions.length > 0 &&
+          actions.map((a, i) => (
+            <RanCard
+              key={`${a.tool}-${i}`}
+              a={a}
+              lang={lang}
+              live={isStreamingTarget}
+              animateCode={ranPlayback.animate}
+              deferCode={ranPlayback.defer}
+              pendingApproval={pendingApproval}
+              onApprove={onApprove}
+              onAbortApproval={onAbortApproval}
+              onViewTerminal={onViewTerminal}
+            />
+          ))}
         {plan && plan.length > 0 && <ToolPlanSection actions={plan} lang={lang} />}
         {msg.tokensIn !== undefined && msg.tokensOut !== undefined && (
           <div className="mt-2 text-[11px] text-[#71717A]">
@@ -481,6 +655,8 @@ export function ChatPanel(props: Props) {
   const [copiedAll, setCopiedAll] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [stickToBottom, setStickToBottom] = useState(true);
+  const followChatRef = useRef(true);
+  const manualChatScrollRef = useRef(false);
   const [showJump, setShowJump] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -516,6 +692,10 @@ export function ChatPanel(props: Props) {
   };
   useEffect(() => {
     if (props.streaming) {
+      followChatRef.current = true;
+      manualChatScrollRef.current = false;
+      setStickToBottom(true);
+      setShowJump(false);
       // New turn: start from empty and remember which message we animate.
       // The placeholder assistant message is already in `messages` here
       // (App adds it before setStreaming(true)), so lastAssistant is it.
@@ -535,6 +715,12 @@ export function ChatPanel(props: Props) {
     const id = window.setInterval(() => {
       const target = targetRef.current;
       const cur = displayedRef.current;
+      // If a new assistant step replaces an incompatible partial reply,
+      // restart the visible prose rather than showing all of the answer.
+      if (cur.length > 0 && !target.startsWith(cur)) {
+        setDisplayedBoth("");
+        return;
+      }
       if (cur.length >= target.length) {
         if (!streamingRef.current) {
           window.clearInterval(id);
@@ -546,7 +732,7 @@ export function ChatPanel(props: Props) {
       // unclosed fence mid-stream — just wait for the fence to close.
       if (next.length <= cur.length) return;
       setDisplayedBoth(next);
-    }, 16);
+    }, TYPEWRITER_TICK_MS);
     return () => window.clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.streaming]);
@@ -561,15 +747,23 @@ export function ChatPanel(props: Props) {
   useEffect(() => {
     displayedRef.current = "";
     if (props.displayedTextRef) props.displayedTextRef.current = "";
-    animatedIdRef.current = null;
+    // Keep the ID assigned on the same commit that creates a new chat.
+    // When navigating to an unrelated conversation, do not leak the turn.
+    if (!props.streaming || lastAssistant?.id !== animatedIdRef.current) {
+      animatedIdRef.current = null;
+    }
     setDisplayed("");
+    followChatRef.current = true;
+    manualChatScrollRef.current = false;
+    setStickToBottom(true);
+    setShowJump(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [convId]);
 
   // True while this conversation's last assistant message is still being
   // typed — during the turn, or during the catch-up after it finished.
   const isTyping =
-    (props.streaming || displayed.length < typewriterTarget.length) &&
+    (props.streaming || displayed !== typewriterTarget) &&
     lastAssistant !== undefined &&
     lastAssistant.id === animatedIdRef.current;
 
@@ -601,31 +795,78 @@ export function ChatPanel(props: Props) {
     }
   }, [props.composerPrefill]);
 
-  // A11 — stick-to-bottom: only auto-scroll while the user is already
-  // near the bottom (120 px tolerance, like IsNearBottom()).
-  const isNearBottom = () => {
-    const el = listRef.current;
-    if (!el) return true;
-    return el.scrollHeight - el.scrollTop - el.clientHeight <= 120;
-  };
+  // Follow DOM changes from both ordinary replies and nested Ran code.
+  // Only deliberate scrolling pauses; returning near the bottom resumes.
   const onScroll = () => {
-    const near = isNearBottom();
-    setStickToBottom(near);
-    setShowJump(!near);
+    const el = listRef.current;
+    if (!el) return;
+    const next = reconcileScrollFollow(
+      followChatRef.current, manualChatScrollRef.current, el, 80,
+    );
+    manualChatScrollRef.current = false;
+    if (followChatRef.current !== next) {
+      followChatRef.current = next;
+      setStickToBottom(next);
+      setShowJump(!next);
+    }
   };
+  const handleChatWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    manualChatScrollRef.current = true;
+    if (e.deltaY < 0) {
+      followChatRef.current = false;
+      setStickToBottom(false);
+      setShowJump(true);
+    }
+  };
+  const handleChatTouchMove = () => {
+    manualChatScrollRef.current = true;
+    followChatRef.current = false;
+    setStickToBottom(false);
+    setShowJump(true);
+  };
+  const handleChatKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowUp", "PageUp", "Home", "ArrowDown", "PageDown", "End"].includes(e.key)) return;
+    manualChatScrollRef.current = true;
+    if (["ArrowUp", "PageUp", "Home"].includes(e.key)) {
+      followChatRef.current = false;
+      setStickToBottom(false);
+      setShowJump(true);
+    }
+  };
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (el && stickToBottom && followChatRef.current) el.scrollTop = el.scrollHeight;
+  });
+  // LiveCode updates its own React state; ChatPanel does not rerender on
+  // every code character. Observe nested mutations and follow in the next
+  // animation frame, without overriding a deliberate upward scroll.
   useEffect(() => {
     const el = listRef.current;
-    if (el && stickToBottom) el.scrollTop = el.scrollHeight;
-  }, [messages.length, displayed, props.streaming, stickToBottom]);
+    if (!el) return;
+    let frame = 0;
+    const observer = new MutationObserver(() => {
+      if (!followChatRef.current || frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        if (followChatRef.current) el.scrollTop = el.scrollHeight;
+      });
+    });
+    observer.observe(el, { subtree: true, childList: true, characterData: true });
+    return () => {
+      observer.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [convId]);
   const jumpToBottom = () => {
     const el = listRef.current;
     if (el) {
+      followChatRef.current = true;
+      manualChatScrollRef.current = false;
       el.scrollTop = el.scrollHeight;
       setStickToBottom(true);
       setShowJump(false);
     }
   };
-
   // Auto-resize composer.
   useEffect(() => {
     const el = taRef.current;
@@ -736,9 +977,6 @@ export function ChatPanel(props: Props) {
       ? t(lang, "welcomeHintNoConnection")
       : t(lang, "welcomeHintReady");
 
-  const latestThought =
-    props.streamingThoughts.length > 0 ? props.streamingThoughts[props.streamingThoughts.length - 1] : null;
-
   return (
     <div className="flex h-full flex-col bg-[#22232C]">
       {/* Header */}
@@ -784,7 +1022,16 @@ export function ChatPanel(props: Props) {
       ) : null}
 
       {/* Messages */}
-      <div ref={listRef} onScroll={onScroll} className="relative min-h-0 flex-1 overflow-y-auto py-2" role="log" aria-label={t(lang, "messages")}>
+      <div ref={listRef} onScroll={onScroll} onWheel={handleChatWheel}
+        onTouchMove={handleChatTouchMove} onKeyDown={handleChatKeyDown}
+        onPointerDown={(e) => {
+          if (e.clientX >= e.currentTarget.getBoundingClientRect().right - 18) {
+            manualChatScrollRef.current = true;
+            followChatRef.current = false;
+            setStickToBottom(false);
+            setShowJump(true);
+          }
+        }} className="relative min-h-0 flex-1 overflow-y-auto py-2" role="log" aria-label={t(lang, "messages")}>
         {messages.length === 0 && !props.streaming && (
           <div className="flex h-full flex-col items-center justify-center px-6 py-8 text-center">
             <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#71717A]">{t(lang, "welcomeEyebrow")}</p>
@@ -844,6 +1091,8 @@ export function ChatPanel(props: Props) {
             lang={lang}
             isStreamingTarget={props.streaming && lastAssistant?.id === m.id}
             isTypingTarget={isTyping && lastAssistant?.id === m.id}
+            sequenceRanCode={lastAssistant?.id === m.id && (props.streaming || animatedIdRef.current === m.id)}
+            typingTarget={typewriterTarget}
             streamingText={displayed}
             streamingPlan={props.streamingPlan}
             streamingActions={props.streamingActions}
@@ -856,16 +1105,10 @@ export function ChatPanel(props: Props) {
             onViewTerminal={props.onViewTerminal}
           />
         ))}
-        {props.streaming && (
+        {props.streaming && props.goalActive && (
           <div className="flex items-center gap-2 px-4 py-2 text-[12px] text-[#71717A]" aria-live="polite">
             <span className="h-2 w-2 animate-pulse rounded-full bg-[#3867F5]" />
-            {props.goalActive ? (
-              <span className="font-medium text-[#F5A623]">🎯 {t(lang, "goalRunning")}</span>
-            ) : latestThought ? (
-              <span className="min-w-0 truncate">{latestThought}</span>
-            ) : (
-              <span>{t(lang, "thinking")}</span>
-            )}
+            <span className="font-medium text-[#F5A623]">🎯 {t(lang, "goalRunning")}</span>
           </div>
         )}
         {showJump && (

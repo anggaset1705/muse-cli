@@ -22,6 +22,7 @@
 //! * [`error`] — `AgentError` + `CancellationToken`.
 
 pub mod approval;
+pub mod code_quality;
 pub mod chat_turn;
 pub mod context;
 pub mod driver;

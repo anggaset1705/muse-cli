@@ -77,9 +77,11 @@ const CHAT_STATE_TEMPLATE: &str = r##"(() => {
     if (['BUTTON', 'SVG', 'SCRIPT', 'STYLE'].includes(tag) || node.getAttribute('aria-hidden') === 'true') return '';
     if (tag === 'PRE') {
       const code = node.querySelector('code') || node;
+      // innerText keeps visual line breaks in highlighted block-line spans;
+      // textContent would concatenate display:block children into invalid code.
       const language = (code.className || '').match(/(?:language|lang)-([\w-]+)/)?.[1]
         || code.getAttribute('data-language') || node.getAttribute('data-language') || '';
-      return '\n```' + language + '\n' + (code.textContent || '') + '\n```\n';
+      return '\n```' + language + '\n' + (code.innerText || code.textContent || '').replace(/\r\n?/g, '\n') + '\n```\n';
     }
     if (tag === 'BR') return '\n';
     const body = [...node.childNodes].map(replyText).join('');

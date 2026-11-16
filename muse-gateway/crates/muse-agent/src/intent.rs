@@ -197,6 +197,16 @@ pub fn required(prompt: &str) -> u32 {
     if re(r"\b(?:kiem tra|danh gia|xem) (?:muc )?do hoan thien\b").is_match(&text) {
         result |= work::READ;
     }
+    // Code-generation requests in Indonesian must require actual file work,
+    // not just a prose answer claiming that the script already exists.
+    // Only concrete imperatives count; capability/how-to questions remain read-only.
+    if re(r"\b(?:buat(?:kan|lah)?|bikinkan|bikin|tuliskan|hasilkan|rancang(?:kan)?|generate)\b[^\n.!?]{0,160}\b(?:script|skrip|kode|code|source|program|aplikasi|app|file|berkas|proyek|project)\b")
+        .is_match(&text)
+        && !re(r"^\s*(?:apakah|apa|bisakah|bisa|bagaimana|gimana|how|can)\b")
+            .is_match(&text)
+    {
+        result |= work::EDIT;
+    }
     let edit_text = re(r"\b(?:muc )?do hoan thien\b").replace_all(&text, "muc do day du");
     if re(r"\b(doc|xem (?:file|tep|du an|ma|git)|tim (?:file|tep|loi|kiem)|kiem tra (?:du an|ma|thay doi|code)|tim hieu du an|giai thich du an|read|inspect|search files|review project)\b")
         .is_match(&text)

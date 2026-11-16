@@ -737,6 +737,12 @@ impl ToolExecutor {
                 "text file exceeds 2 MiB".to_string(),
             ));
         }
+        // The agent must not turn malformed generated source into a
+        // successful write_file or edit_file receipt. This parser-only
+        // guard neither executes source code nor reformats user content.
+        crate::code_quality::validate(&full, &after)
+            .await
+            .map_err(AgentError::Invalid)?;
         let preview = crate::text_diff::create(&path, before.as_deref(), &after);
         Ok(ToolApproval {
             description: Self::describe(&call),

@@ -721,6 +721,15 @@ async fn chat_turn_turbo_executes_write() {
     assert_eq!(std::fs::read_to_string(root.join("hello.txt")).unwrap(), "hi there");
     assert!(events.iter().any(|e| e.kind == "tool_start" && e.tool.as_deref() == Some("write_file")));
     assert!(events.iter().any(|e| e.kind == "tool_result"));
+    // Live-typed code in the Ran card (13 Nov 2026): the file content
+    // streams as `tool_content` chunks before the write executes, so the
+    // UI can type it out live inside the card.
+    let typed: String = events
+        .iter()
+        .filter(|e| e.kind == "tool_content" && e.tool.as_deref() == Some("write_file"))
+        .map(|e| e.text.as_str())
+        .collect();
+    assert_eq!(typed, "hi there");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1344,5 +1353,103 @@ async fn chat_turn_skill_long_content_truncated() {
     let system = reqs[0].messages[0]["content"].as_str().unwrap();
     assert!(system.contains("[... skill content truncated ...]"));
     assert_eq!(app_state_of(&reqs[0])["active_skills"], json!(["big"]));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn system_prompt_requires_readable_source_and_python_syntax_checks() {
+    for locale in ["English", "Bahasa Indonesia"] {
+        let prompt = muse_agent::system_prompt::system_prompt_for(locale);
+        assert!(prompt.contains("CODE OUTPUT FORMATTING"));
+        assert!(prompt.contains("Python code must use four spaces"));
+        assert!(prompt.contains("a real newline"));
+        assert!(prompt.contains(r"JSON \n escapes"));
+        assert!(prompt.contains("python -m py_compile"));
+        assert!(prompt.contains("fenced Markdown"));
+        assert!(prompt.contains("Never change a user's existing file merely for style"));
+        assert!(prompt.contains(r#"{"tool_calls":"#));
+        assert!(prompt.contains("user approval"));
+    }
+}
+
+#[tokio::test]
+async fn generated_code_rejects_invalid_source_before_file_write() {
+    use std::path::Path;
+    use muse_agent::code_quality::validate;
+
+    let bad_python = "BG = '#e0e5ec'TEXT = '#b5b6470'\n";
+    let py_error = validate(Path::new("kalkulator_neumorphism.py"), bad_python)
+        .await.err().expect("invalid Python must fail");
+    assert!(py_error.contains("Python"), "{py_error}");
+    let joined_python = "x = 1; y = 2\n";
+    let style_error = validate(Path::new("compact.py"), joined_python)
+        .await.err().expect("multiple statements on same line must fail");
+    assert!(style_error.contains("formatting"), "{style_error}");
+    assert!(validate(Path::new("good.py"), "import tkinter as tk\n\nBG = '#e0e5ec'\nTEXT = '#b5b6470'\n").await.is_ok());
+
+    assert!(validate(Path::new("config.json"), r#"{"enabled":true}"#).await.is_ok());
+    assert!(validate(Path::new("config.json"), "{not json}").await.is_err());
+    assert!(validate(Path::new("module.mjs"), "export const answer = 42;\n").await.is_ok());
+    assert!(validate(Path::new("module.js"), "const = ;\n").await.is_err());
+    let flattened = "body { font-family: monospace; }".repeat(12);
+    assert!(validate(Path::new("site.css"), &flattened).await.is_err());
+    assert!(validate(Path::new("site.css"), "body {\n  color: red;\n}\n").await.is_ok());
+    assert!(validate(Path::new("notes.txt"), "anything on one line").await.is_ok());
+
+    let root = temp_workspace("malformed-code");
+    let ex = ToolExecutor::new(&root, "auto").unwrap();
+    let cancel = CancellationToken::new();
+    let call = call(
+        "write_file",
+        json!({"path": "bad.py", "content": bad_python}),
+    );
+    let err = ex.prepare_for_agent(&call, &cancel).await.err().expect("write rejected");
+    assert!(err.to_string().contains("Python"), "{err}");
+    assert!(!root.join("bad.py").exists(), "rejected file was not written");
+}
+
+
+/// Regression from 14 November: a model saying a requested script "already exists"
+/// must not be treated as completion when no local file operation ran.
+#[tokio::test]
+async fn indonesian_script_request_retries_false_completion_then_writes_real_code() {
+    let root = temp_workspace("id-script-missing-actions");
+    let mut session =
+        AgentSession::new(&root, "auto", "muse-chat", "Bahasa Indonesia", true, None).unwrap();
+    let driver = ScriptDriver::new(vec![
+        r#"{"status":"completed","summary":"Selesai. Script sudah ada di kalkulator_neumorphism.py."}"#,
+        r#"{"tool_calls":[{"name":"write_file","arguments":{"path":"kalkulator_neumorphism.py","content":"import tkinter as tk\n\nBG = '#e0e5ec'\nTEXT = '#334155'\n\nprint(BG, TEXT)\n"}}]}"#,
+        r#"{"status":"completed","summary":"File Python berhasil dibuat."}"#,
+    ]);
+    let mut events = Vec::<AgentEvent>::new();
+    let cancel = CancellationToken::new();
+    let outcome = run_turn(
+        &mut session,
+        "buatkan script python kalkulator dengan ui style neumorphism",
+        vec![],
+        &driver,
+        &mut events,
+        TurnOptions {
+            interactive: true,
+            ..Default::default()
+        },
+        &cancel,
+    )
+    .await;
+
+    assert!(outcome.ok, "{outcome:?}");
+    let path = root.join("kalkulator_neumorphism.py");
+    let source = std::fs::read_to_string(&path).expect("requested script must actually exist");
+    assert!(source.starts_with("import tkinter as tk\n\nBG ="));
+    assert!(source.contains("\nTEXT ="));
+    assert!(events.iter().any(|e| e.kind == "protocol_retry"));
+    assert!(events.iter().any(|e| e.kind == "tool_start" && e.tool.as_deref() == Some("write_file")));
+    let typed: String = events
+        .iter()
+        .filter(|e| e.kind == "tool_content" && e.tool.as_deref() == Some("write_file"))
+        .map(|e| e.text.as_str())
+        .collect();
+    assert_eq!(typed, source, "Ran code must show original complete file");
+    assert!(events.iter().any(|e| e.kind == "completed"));
     let _ = std::fs::remove_dir_all(&root);
 }

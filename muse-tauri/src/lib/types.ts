@@ -47,9 +47,16 @@ export interface ToolActionState {
   description?: string;
   /** Diff/preview text for write/edit actions (if any). */
   preview?: string;
+  /** File content streamed live for write/edit actions (typed live in
+   * the Ran card): the full after-text the tool is writing, accumulated
+   * from `tool_content` events. Persisted with the action, so a saved
+   * message shows the whole content at once. */
+  content?: string;
   status: ToolActionStatus;
   /** Tool result text (truncated by the UI when shown). */
   result?: string;
+  /** Exit code parsed from the result metadata (run_command), if any. */
+  exitCode?: number;
   /** Server approval id while status is awaiting_approval. */
   approvalId?: string;
   /** Workspace-relative path the action targets (if any). */

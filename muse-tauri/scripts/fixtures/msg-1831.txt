@@ -1,0 +1,26 @@
+Cara menjalankannya: python kalkulator.py, lalu pilih 1 untuk tambah, 2 untuk kurang, 3 untuk kali, 4 untuk bagi, dan 5 untuk keluar.
+
+python
+
+
+
+```
+# Kalkulator sederhana# Cara jalanin: python kalkulator.py
+def tambah(a, b):    return a + b
+def kurang(a, b):    return a - b
+def kali(a, b):    return a * b
+def bagi(a, b):    if b == 0:        return "Tidak bisa dibagi 0!"    return a / b
+def baca_angka(pesan):    while True:        try:            return float(input(pesan))        except ValueError:            print("Masukkan angka yang benar, ya.")
+def main():    print("=== Kalkulator Sederhana ===")    print("1. Tambah (+)")    print("2. Kurang (-)")    print("3. Kali (*)")    print("4. Bagi (/)")    print("5. Keluar")
+    while True:        pilihan = input("\nPilih operasi (1-5): ").strip()
+        if pilihan == "5":            print("Terima kasih, sampai jumpa!")            break
+        if pilihan not in ("1", "2", "3", "4"):            print("Pilihan tidak ada, coba 1 sampai 5.")            continue
+        a = baca_angka("Masukkan angka pertama: ")        b = baca_angka("Masukkan angka kedua: ")
+        if pilihan == "1":            hasil = tambah(a, b)            simbol = "+"        elif pilihan == "2":            hasil = kurang(a, b)            simbol = "-"        elif pilihan == "3":            hasil = kali(a, b)            simbol = "*"        else:            hasil = bagi(a, b)            simbol = "/"
+        print(f"Hasil: {a} {simbol} {b} = {hasil}")
+if __name__ == "__main__":    main()
+```
+
+
+
+Mau ditambah fitur lain, misalnya pangkat atau akar?

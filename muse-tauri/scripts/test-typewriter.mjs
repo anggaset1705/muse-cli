@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tw-test-"));
@@ -32,10 +32,8 @@ fs.writeFileSync(
     files: [path.join(repo, "src", "lib", "typewriter.ts")],
   }),
 );
-execFileSync(path.join(repo, "node_modules", ".bin", "tsc"), ["-p", tmpTsconfig], { stdio: "pipe" });
-const { fenceCount, safeCut, typewriterStep, typewriterStepSize } = await import(
-  path.join(tmp, "typewriter.js")
-);
+execFileSync(process.execPath, [path.join(repo, "node_modules", "typescript", "bin", "tsc"), "-p", tmpTsconfig], { stdio: "pipe" });
+const { fenceCount, safeCut, typewriterStep, typewriterStepSize, TYPEWRITER_TICK_MS } = await import(pathToFileURL(path.join(tmp, "typewriter.js")).href);
 
 let passed = 0;
 let failed = 0;
@@ -74,12 +72,12 @@ function runTicks(full, { feed = Infinity, endAt = 0, maxTicks = 5000 } = {}) {
 
 console.log("typewriter engine (real src/lib/typewriter.ts):");
 
-check("step size: 3/tick for a short gap, 30 for gap>600, 60 for gap>2000", () => {
-  assert.equal(typewriterStepSize(90), 3);
-  assert.equal(typewriterStepSize(600), 3);
-  assert.equal(typewriterStepSize(601), 30);
-  assert.equal(typewriterStepSize(2000), 30);
-  assert.equal(typewriterStepSize(2001), 60);
+check("step size: 3/tick for a short gap, 6 for gap>600, 12 for gap>2000", () => {
+  assert.equal(typewriterStepSize(90), 1);
+  assert.equal(typewriterStepSize(600), 1);
+  assert.equal(typewriterStepSize(601), 2);
+  assert.equal(typewriterStepSize(2000), 2);
+  assert.equal(typewriterStepSize(2001), 4);
 });
 
 check("(i) one full ~90 char delta, streaming ends at once: types gradually, ~0.5 s, ends full", () => {
@@ -96,8 +94,8 @@ check("(i) one full ~90 char delta, streaming ends at once: types gradually, ~0.
     assert.ok(target.startsWith(history[i]), "displayed is always a prefix of target");
   }
   assert.equal(displayed, target);
-  const seconds = (ticks * 16) / 1000;
-  assert.ok(seconds >= 0.4 && seconds <= 0.7, `took ${seconds.toFixed(2)} s for ${target.length} chars`);
+  const seconds = (ticks * TYPEWRITER_TICK_MS) / 1000;
+  assert.ok(seconds >= 1.8 && seconds <= 3.2, `took ${seconds.toFixed(2)} s for ${target.length} chars`);
   console.log(`      (${target.length} chars in ${ticks} ticks = ${seconds.toFixed(2)} s)`);
 });
 
@@ -106,35 +104,45 @@ check("(ii) long reply (5000 chars), one delta: finishes in seconds, not minutes
   assert.equal(target.length, 5000);
   const { displayed, ticks } = runTicks(target);
   assert.equal(displayed, target);
-  const seconds = (ticks * 16) / 1000;
-  assert.ok(seconds < 10, `took ${seconds.toFixed(2)} s`);
+  const seconds = (ticks * TYPEWRITER_TICK_MS) / 1000;
+  // Top tier is 12/tick on purpose (13 Nov 2026 fix): ~11 s for 5000
+  // chars is visibly live and still seconds, not minutes.
+  assert.ok(seconds >= 30 && seconds < 65, `took ${seconds.toFixed(2)} s`);
   console.log(`      (5000 chars in ${ticks} ticks = ${seconds.toFixed(2)} s)`);
 });
 
-check("(iii) code fences are never cut mid-fence during the animation", () => {
+check("(iii) code fences are typed THROUGH, never jumped whole (13 Nov 2026 fix)", () => {
   const target =
     "Berikut kodenya:\n```js\nconst a = 1;\nconsole.log(a);\n```\nLalu lanjut:\n```python\nprint('halo')\n```\nSelesai.";
-  // While streaming the engine holds at a fence opener (a tick that
-  // advances by 0) until the fence closes.
+  // The old engine held at a fence opener and then brought the whole
+  // block in at once (a 1383-char single-tick jump in Bree's 18:31 live
+  // test) — the code therefore appeared whole instead of being typed.
+  // The chase now types through the fence: every tick adds at most one
+  // step (12 chars), and the displayed text passes through mid-fence
+  // states with partial code. MessageView splits on ``` and renders a
+  // partial fence as a CodeBlock, so typing mid-block never breaks it.
+  const done = runTicks(target);
+  assert.equal(done.displayed, target);
+  let maxJump = 0;
+  for (let i = 1; i < done.history.length; i++) {
+    const jump = done.history[i].length - done.history[i - 1].length;
+    assert.ok(jump >= 0, "displayed never shrinks");
+    assert.ok(jump <= 12, `one tick added ${jump} chars — a block jumped in whole`);
+    assert.ok(target.startsWith(done.history[i]), "displayed is always a prefix of target");
+    maxJump = Math.max(maxJump, jump);
+  }
+  assert.ok(maxJump > 0, "expected the chase to advance");
+  const midFence = done.history.find(
+    (h) => fenceCount(h) % 2 === 1 && h.includes("const a = 1"),
+  );
+  assert.ok(midFence, "expected a mid-fence intermediate with partial code");
+  // While streaming with slow deltas the same holds: no tick adds more
+  // than one step.
   const live = runTicks(target, { feed: 3, endAt: 10000 });
-  for (const h of live.history) {
-    assert.equal(fenceCount(h) % 2, 0, `odd fence count in intermediate ${JSON.stringify(h.slice(-40))}`);
+  for (let i = 1; i < live.history.length; i++) {
+    assert.ok(live.history[i].length - live.history[i - 1].length <= 12, "streaming tick added too much");
   }
   assert.equal(live.displayed, target);
-  assert.ok(live.history.some((h, i) => i > 0 && h === live.history[i - 1]), "expected a hold tick at a fence");
-  // After the turn ends the same reply still converges, with every
-  // intermediate fence-even; a held cut jumps past the closing fence
-  // (block appears whole) instead of jumping to the full text.
-  const done = runTicks(target);
-  for (const h of done.history) {
-    assert.equal(fenceCount(h) % 2, 0, `odd fence count in post-finish intermediate ${JSON.stringify(h.slice(-40))}`);
-  }
-  assert.equal(done.displayed, target);
-  // Normal ticks advance at most 3 chars here (short target); any bigger
-  // single-tick advance is a jump past a closing fence.
-  const jumps = done.history.filter((h, i) => i > 0 && h.length - done.history[i - 1].length > 6);
-  assert.ok(jumps.length > 0, "expected a jump past a closing fence");
-  assert.ok(jumps.every((h) => h.endsWith("```")), "jump must land just after a closing fence");
 });
 
 check("(iv) Stop mid-animation: displayed freezes at what was typed, never jumps to full", () => {
@@ -166,13 +174,23 @@ check("(vi) unclosed fence in the FINAL text: jumps to full instead of truncatin
   assert.equal(displayed, target);
 });
 
-check("(vii) target replaced mid-turn (fallback note prepended at finish): jumps to full, no garbled mix", () => {
+check("(vii) target replaced mid-turn: clear old prefix, then type final instead of jumping", () => {
   const streamed = "Ringkasan balasan.";
   let displayed = "";
   for (let i = 0; i < 3; i++) displayed = typewriterStep(streamed, displayed, true);
   assert.ok(displayed.length > 0 && displayed.length < streamed.length);
   const finalTarget = "Catatan: mode fallback.\n\nRingkasan balasan.";
-  assert.equal(typewriterStep(finalTarget, displayed, false), finalTarget);
+  assert.equal(typewriterStep(finalTarget, displayed, false), "");
+  let corrected = "";
+  let ticks = 0;
+  while (corrected !== finalTarget && ticks < 1000) {
+    const next = typewriterStep(finalTarget, corrected, false);
+    assert.ok(next.length - corrected.length <= 4, "replacement retypes in small steps");
+    corrected = next;
+    ticks++;
+  }
+  assert.equal(corrected, finalTarget);
+  assert.ok(ticks > 10, "final reply passes through partial states");
 });
 
 console.log("first-paint background:");
