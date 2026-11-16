@@ -274,7 +274,7 @@ export function Sidebar(props: Props) {
         <img src={logoUrl} alt="Muse CLI" className="h-9 w-9 shrink-0 rounded-lg object-cover" />
         <div className="leading-tight">
           <div className="text-[15px] font-semibold">Muse CLI</div>
-          <div className="text-[11px] text-[#71717A]">v0.1.0</div>
+          <div className="text-[11px] text-[#71717A]">v0.1.1</div>
         </div>
         <span className="ml-auto rounded border border-[#343541] px-1.5 py-0.5 text-[10px] text-[#A1A1AA]">
           {t(lang, "liveBadge")} · {t(lang, "appTagline")}

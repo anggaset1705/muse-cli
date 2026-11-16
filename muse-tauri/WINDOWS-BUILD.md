@@ -1,4 +1,4 @@
-# Build Windows — Muse Tauri (v0.1.0)
+# Build Windows — Muse Tauri (v0.1.1)
 
 > BELUM dicoba di Windows setelah pergantian sidecar ke Rust.
 > Instruksi ini disusun dari konfigurasi `tauri.conf.json` +
@@ -100,7 +100,7 @@ nama folder dipertahankan dari era lama, isinya data gateway Rust.
 
 ## Validasi konfigurasi (sudah dicek di Linux)
 - `tauri.conf.json`: id `com.bstore.muse`, productName `Muse`,
-  version `0.1.0`, window 1560×900 (min 1100×650), app windows
+  version `0.1.1`, window 1560×900 (min 1100×650), app windows
   `app > windows` — tidak ada pengaturan khusus Windows yang hilang;
   build Windows memakai `bundle > active: true` default (msi + nsis).
 - Sidecar external binary TIDAK dideklarasikan di `tauri.conf.json`

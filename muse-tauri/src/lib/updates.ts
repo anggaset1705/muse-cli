@@ -23,7 +23,7 @@ export interface UpdateCheckResult {
 
 const REPO = "anggaset1705/muse-cli";
 const RELEASE_ENDPOINT = `https://api.github.com/repos/${REPO}/releases/latest`;
-const CURRENT_VERSION = "0.1.0";
+const CURRENT_VERSION = "0.1.1";
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 jam, seperti DesktopUpdates
 const CACHE_KEY = "muse.update-check.v1";
 
