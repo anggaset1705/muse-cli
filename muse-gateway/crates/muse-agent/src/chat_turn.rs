@@ -333,6 +333,7 @@ async fn run_turn_inner(
             );
         }
 
+        session.tools.set_skills_directory(session.skills_directory.clone());
         // -- skills ----------------------------------------------------------
         // .NET AgentLoop: when the prompt mentions a skill with @alias, its
         // content is added to this turn's instructions, between the workspace
@@ -343,10 +344,10 @@ async fn run_turn_inner(
         // imported or enabled/disabled since the last turn is visible on
         // the next one. Unknown or disabled skills are skipped silently.
         // For a /goal turn `prompt` is already the goal task prompt here.
-        let (skill_block, applied_skills): (String, Vec<String>) =
+        let (skill_block, mut applied_skills): (String, Vec<String>) =
             match &session.skills_directory {
                 Some(dir) => match muse_store::SkillStore::new(dir) {
-                    Ok(store) => store.expand(&prompt),
+                    Ok(store) => store.expand_for_prompt(&prompt),
                     Err(err) => {
                         obs.emit(AgentEvent::new(
                             "skill",
@@ -422,6 +423,84 @@ async fn run_turn_inner(
         };
         messages.push(user_message);
 
+        // Fast native-media route: a simple one-scene "buatkan video 10
+        // detik" or one-image request must not wait for the Muse web
+        // planner to return its very first token. The browser's old 45s
+        // first-token timeout prevented even studio_create from running.
+        // Complex storyboards and references still use the model planner.
+        if verification.is_none() && images.is_empty() && !session.read_only {
+            if let Some((create_args,render_name))=crate::studio::quick_plan(&prompt) {
+                let create_call=ToolCall::new("studio_create",create_args);
+                obs.emit(AgentEvent::new("tool_start",ToolExecutor::describe(&create_call))
+                    .with_tool("studio_create",None));
+                let prepared=session.tools.prepare_for_agent(&create_call,cancel).await?;
+                if ToolExecutor::needs_confirmation(&create_call)
+                    && !confirm(session,&prepared,cancel,&mut *obs.sink,options.interactive).await?
+                {
+                    obs.emit(AgentEvent::new("declined",lang(session,
+                        "Studio project creation was not approved. No video render was requested.",
+                        "Pembuatan project Studio tidak disetujui. Tidak ada render video yang diminta.")));
+                    return Ok(TurnOutcome::declined("Studio project creation declined."));
+                }
+                let created=session.tools.execute_prepared(&prepared,cancel,None).await?;
+                obs.emit(AgentEvent::new("tool_result",created.clone())
+                    .with_tool("studio_create",None));
+                messages.push(json!({"role":"user","muse_tool":"studio_create",
+                    "content":format!("Tool result for studio_create:\n{created}")}));
+                let Some(project)=created.strip_prefix("studio_project_created: ")
+                    .and_then(|s|s.lines().next()).map(str::trim).filter(|s|!s.is_empty())
+                else {
+                    obs.emit(AgentEvent::new("incomplete",format!(
+                        "Muse Studio did not create a project: {created}")));
+                    return Ok(TurnOutcome::incomplete("Muse Studio project creation failed."));
+                };
+                let mut render_args=Map::new();
+                render_args.insert("project".into(),json!(project));
+                if render_name=="studio_render_image" {render_args.insert("scene".into(),json!(1));}
+                let render=ToolCall::new(render_name,render_args);
+                obs.emit(AgentEvent::new("tool_start",ToolExecutor::describe(&render))
+                    .with_tool(render_name,None));
+                let approval=session.tools.prepare_for_agent(&render,cancel).await?;
+                if !confirm(session,&approval,cancel,&mut *obs.sink,options.interactive).await? {
+                    let text=lang(session,
+                        &format!("Project {project} was saved, but you declined external media generation. No video/image render was started."),
+                        &format!("Project {project} tersimpan, tetapi render media belum disetujui. Tidak ada render video/gambar yang dimulai."));
+                    obs.emit(AgentEvent::new("assistant",text.clone()));
+                    messages.push(json!({"role":"assistant","content":text}));
+                    obs.emit(AgentEvent::new("declined",lang(session,
+                        "External media render declined; project saved.",
+                        "Render media ditolak; project tetap tersimpan.")));
+                    return Ok(TurnOutcome::declined("External media render declined; project saved."));
+                }
+                let result=session.tools.execute_prepared(&approval,cancel,None).await?;
+                obs.emit(AgentEvent::new("tool_result",result.clone())
+                    .with_tool(render_name,None));
+                messages.push(json!({"role":"user","muse_tool":render_name,
+                    "content":format!("Tool result for {render_name}:\n{result}")}));
+                let ok=if render_name=="studio_render_image"{
+                    result.starts_with("studio_image_queued: ")
+                }else{result.starts_with("studio_render_started: ")};
+                if !ok {
+                    let text=lang(session,
+                        &format!("Studio project {project} was saved, but media generation could not start: {result}"),
+                        &format!("Project Studio {project} sudah tersimpan, tetapi render belum bisa dimulai: {result}"));
+                    obs.emit(AgentEvent::new("assistant",text.clone()));
+                    messages.push(json!({"role":"assistant","content":text}));
+                    obs.emit(AgentEvent::new("incomplete",lang(session,
+                        "Native media render did not start; no MP4 or image was claimed.",
+                        "Render media tidak dimulai; belum ada klaim MP4 atau gambar berhasil.")));
+                    return Ok(TurnOutcome::incomplete("Native media generation could not start."));
+                }
+                let summary=lang(session,
+                    &format!("Studio project {project} created. The external media task was queued after your approval. This is NOT yet a completed video/image. Use studio_status or studio_refresh to check the actual result."),
+                    &format!("Project Studio {project} dibuat. Tugas media dimulai setelah persetujuan. Ini BUKAN video/gambar yang sudah selesai. Gunakan studio_status atau studio_refresh untuk memeriksa hasil aslinya."));
+                obs.emit(AgentEvent::new("assistant",summary.clone()));
+                messages.push(json!({"role":"assistant","content":summary.clone()}));
+                obs.emit(AgentEvent::new("completed",summary.clone()));
+                return Ok(TurnOutcome::completed(summary));
+            }
+        }
+
         let mut failures: HashMap<String, u32> = HashMap::new();
         let mut required = intent::required(&prompt);
         if verification.is_some() {
@@ -432,6 +511,61 @@ async fn run_turn_inner(
                 | work::COMPUTER_SCREENSHOT;
         }
         let mut evidence = work::NONE;
+        // Existing-file edits must begin with actual workspace evidence,
+        // not two unverified prose replies. For a single explicitly named
+        // source file, perform a bounded, READ-ONLY local preflight using
+        // exactly the same jailed executor as normal tool calls. This
+        // records the current read-version for the stale-write guard.
+        // It never edits a file or bypasses human approvals.
+        if verification.is_none()
+            && images.is_empty()
+            && !session.read_only
+            && required & work::EDIT != 0
+        {
+            if let Some(filename) = intent::unambiguous_edit_filename(&prompt) {
+                if session
+                    .tools
+                    .resolve_path(&filename)
+                    .map(|full| full.is_file())
+                    .unwrap_or(false)
+                {
+                    let mut args = Map::new();
+                    args.insert("path".into(), json!(filename));
+                    args.insert("start_line".into(), json!(1));
+                    args.insert("max_lines".into(), json!(350));
+                    args.insert("details".into(), json!(true));
+                    let call = ToolCall::new("read_file", args);
+                    obs.emit(
+                        AgentEvent::new("tool_start", ToolExecutor::describe(&call))
+                            .with_tool("read_file", Some(filename.clone())),
+                    );
+                    let receipt = match session.tools.execute(&call, cancel, None).await {
+                        Ok(receipt) => receipt,
+                        Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                        Err(err) => format!("error: {err}"),
+                    };
+                    obs.emit(
+                        AgentEvent::new("tool_result", receipt.clone())
+                            .with_tool("read_file", Some(filename.clone())),
+                    );
+                    messages.push(json!({
+                        "role": "user",
+                        "muse_tool": "read_file",
+                        "content": format!(
+                            "Verified LOCAL READ-ONLY preflight for {filename}:\\n{receipt}\\n\
+                             The original file has NOT been edited. The user requested a \
+                             real edit; inspect the above actual source and return a \
+                             targeted edit_file action. No success claim without a \
+                             subsequent native edit_file/write_file receipt."
+                        ),
+                    }));
+                    if !receipt.trim_start().starts_with("error:") {
+                        evidence |= work::READ;
+                    }
+                }
+            }
+        }
+
         let mut protocol_retries = 0u32;
         let mut malformed_replies = 0u32;
         let mut scope_retries = 0u32;
@@ -485,8 +619,22 @@ async fn run_turn_inner(
                 },
                 "remaining": intent::work_to_string(required & !evidence),
                 "computer_scope": session.tools.screen_context_for(&session.reply_language),
-                "next": if required == work::NONE {
+                "next": if required & work::STUDIO_RENDER != 0 {
+                    if evidence & work::STUDIO_PLAN != 0 {
+                        "NATIVE MEDIA PRODUCTION: The user requested an actual AI-generated video/image. Use the project id from the successful studio_project_created tool receipt. For video call studio_render_project {project:id} next; for image call studio_render_image {project:id,scene:1}. Render is async and needs explicit user approval. NEVER substitute Python/imageio, pip, run_command, write_file, or a local drawn animation; those cannot satisfy StudioRender. Do not claim MP4 is ready until the actual studio_final_video_ready receipt.".to_string()
+                    } else {
+                        "NATIVE MEDIA PRODUCTION ROUTE: The user requested a real generated video/image, NOT source code or a Python animation. Start with studio_create using JSON tool_calls; for a 10-second video set scene_count=1, scene_duration=10, and include one detailed scene_prompts entry reflecting the user's characters/story. Example: {\"tool_calls\":[{\"name\":\"studio_create\",\"arguments\":{\"name\":\"Video Project\",\"scene_count\":1,\"scene_duration\":10,\"scene_prompts\":[\"cinematic 10-second scene ...\"]}}]}. Then use the returned project id with studio_render_project (video) or studio_render_image (image); request explicit render approval. Do not use run_command, write_file, Python, pip or imageio as a fallback. If the real video provider is unavailable, explain the error honestly.".to_string()
+                    }
+                } else if required & work::STUDIO_PLAN != 0 {
+                    "NATIVE MUSE STUDIO: Create or update a storyboard/project with studio_create, studio_character, studio_voice and studio_set_scene, not Python scripts. Use JSON tool calls. Do not claim media has been rendered.".to_string()
+                } else if required == work::NONE {
                     format!("Respond to the current user message in {}. For discussion, advice or a comment, return status done with the actual answer in summary and no actions. Resolve references such as continue using conversation_context, but only propose actions requested by the current user; do not execute historical tasks for a casual comment. Do not claim unobserved execution.", session.reply_language)
+                } else if required & work::EDIT != 0 && evidence & work::EDIT == 0 {
+                    if evidence & work::READ != 0 {
+                        "MANDATORY LOCAL FILE EDIT: The native local executor has already READ the requested existing file, and the exact source is in the recent tool receipt. Your NEXT reply MUST be JSON tool_calls with ONE targeted edit_file operation (exact old_text/new_text) for the requested change. Preserve unrelated functions. Do NOT answer with prose, an unsaved code fence, or a false claim that you cannot write to the user's PC. The local executor validates and saves the patch, and only its actual receipt proves completion.".to_string()
+                    } else {
+                        "MANDATORY LOCAL FILE EDIT: Return JSON tool_calls for read_file {path,details:true} on the existing user-named file FIRST; after the real local read receipt, return a targeted edit_file. If the file is not found, list_files/search_files first. Do not return an unverified code-only answer or completion. No file is saved until the local executor returns success.".to_string()
+                    }
                 } else {
                     "Generate the next operation as JSON data for the app. Continue after reading; ask only for information genuinely missing. Do not claim native execution of supplied observations.".to_string()
                 },
@@ -562,11 +710,17 @@ async fn run_turn_inner(
                 }
                 obs.emit(AgentEvent::new("protocol_retry", lang(session, "Skipped an operation outside the current request. Adjusting the reply…", "Operasi di luar permintaan saat ini dilewati. Menyesuaikan balasan…")));
                 scope_retries += 1;
-                if scope_retries >= 2 {
+                let media_request = required & (work::STUDIO_RENDER | work::STUDIO_PLAN) != 0;
+                if scope_retries >= if media_request { 3 } else { 2 } {
                     obs.emit(AgentEvent::new("incomplete", lang(session, "Muse suggested operations outside the request, so the app blocked all of them and the project is unchanged. Please send a clearer request.", "Muse mengusulkan operasi di luar permintaan, jadi aplikasi memblokir semuanya dan proyek belum berubah. Kirim permintaan yang lebih jelas.")));
                     return Ok(TurnOutcome::incomplete("Muse suggested operations outside the request."));
                 }
-                messages.push(json!({ "role": "user", "content": "LOCAL EXECUTOR: The entire action batch was rejected BEFORE execution. This turn is discussion/advice or explicitly read-only. Respect the current user request; return an answer in summary, or read-only file inspection when requested. Do not run commands, edit files or control the screen. Do not resume historical work." }));
+                let instruction = if media_request {
+                    "LOCAL EXECUTOR - MEDIA ROUTE CORRECTION: Rejected all tool calls BEFORE execution. The user asked to CREATE a real video or image, not program one. Do NOT call run_command, write_file, edit_file, Python, pip, imageio or shell. Use studio_create {name,scene_count,scene_duration,scene_prompts} first, followed by studio_render_project {project} for video or studio_render_image for image. Return a valid JSON tool_calls plan. The native render requires human approval. Do not claim render succeeded unless a real tool receipt confirms it."
+                } else {
+                    "LOCAL EXECUTOR: The entire action batch was rejected BEFORE execution. This turn is discussion/advice or explicitly read-only. Respect the current user request; return an answer in summary, or read-only file inspection when requested. Do not run commands, edit files or control the screen. Do not resume historical work."
+                };
+                messages.push(json!({ "role": "user", "content": instruction }));
                 continue;
             }
 
@@ -612,12 +766,24 @@ async fn run_turn_inner(
                     }
                     obs.emit(AgentEvent::new("assistant", ""));
                     protocol_retries += 1;
-                    if protocol_retries >= 2 {
+                    // A concrete edit to one existing file gets a final
+                    // bounded, strictly tool-focused attempt. The old
+                    // two-reply budget was insufficient when a model
+                    // emitted unverified prose twice (14:49 repro).
+                    // No extra native operation is fabricated or run.
+                    let edit_retry_limit = if required & work::EDIT != 0
+                        && intent::unambiguous_edit_filename(&prompt).is_some()
+                    { 3 } else { 2 };
+                    if protocol_retries >= edit_retry_limit {
                         obs.emit(AgentEvent::new("incomplete", lang(session, "Muse has not done enough operations on this project yet. Completion cannot be confirmed; see the Terminal for the steps that ran.", "Muse belum melakukan cukup operasi di proyek ini. Penyelesaian belum bisa dikonfirmasi; lihat Terminal untuk langkah yang sudah berjalan.")));
                         return Ok(TurnOutcome::incomplete("Muse has not done enough operations on this project yet."));
                     }
                     obs.emit(AgentEvent::new("protocol_retry", lang(session, "Asking Muse to turn the reply into operations on the project…", "Meminta Muse mengubah balasan menjadi operasi di proyek…")));
-                    let hint = if missing & work::EDIT != 0 && evidence & work::READ != 0 {
+                    let hint = if missing & work::STUDIO_RENDER != 0 {
+                        "This is a NATIVE media creation request; neither a generated Python script nor a local MP4 from imageio is evidence of StudioRender. Use studio_create with the user's requested scene_count/duration and a real scene_prompts array, then studio_render_project (video) or studio_render_image (image) using the returned project id. Those external render operations require approval; do not claim final media has been generated merely because a script ran. "
+                    } else if missing & work::STUDIO_PLAN != 0 {
+                        "Use studio_create / studio_set_scene / studio_character / studio_voice to save the storyboard and references in Muse Studio. Do not write a Python animation as substitute. "
+                    } else if missing & work::EDIT != 0 && evidence & work::READ != 0 {
                         "You have read local files. Now emit edit_file/write_file requests for the actual requested changes; do not stop at a plan. "
                     } else if missing & (work::COMMAND | work::COMMAND_VERIFIED) != 0 {
                         "Emit run_command for the required check, or process_status until an already started check exits successfully. "
@@ -692,6 +858,30 @@ async fn run_turn_inner(
                             // backpressure to delay the write until the UI
                             // finished typing).
                             if matches!(call.name.as_str(), "write_file" | "edit_file") {
+                                // An EXISTING file is previewed in the right
+                                // workspace editor, while a genuinely NEW
+                                // file keeps the existing live code card in
+                                // chat. This distinction comes from the
+                                // prepared, validated on-disk snapshot,
+                                // never from guessing the prompt or a filename.
+                                // These are previews of the exact prepared
+                                // bytes; the disk write is still atomic below.
+                                if let Some(before) = prepared.original_text.as_deref() {
+                                    obs.emit(
+                                        AgentEvent::new("tool_edit_begin", prepared.preview.clone())
+                                            .with_tool(call.name.clone(), path.clone()),
+                                    );
+                                    let mut begin = 0usize;
+                                    while begin < before.len() {
+                                        let mut end = (begin + 4000).min(before.len());
+                                        while !before.is_char_boundary(end) { end -= 1; }
+                                        obs.emit(
+                                            AgentEvent::new("tool_edit_before", &before[begin..end])
+                                                .with_tool(call.name.clone(), path.clone()),
+                                        );
+                                        begin = end;
+                                    }
+                                }
                                 if let Some(content) = prepared.new_text.as_deref() {
                                     let mut start = 0usize;
                                     while start < content.len() {
@@ -798,6 +988,30 @@ async fn run_turn_inner(
                 if result.to_lowercase().starts_with("error: user declined") {
                     obs.emit(AgentEvent::new("declined", lang(session, "Stopped the part you had not allowed. Steps already completed are kept.", "Menghentikan bagian yang belum Anda izinkan. Langkah yang sudah selesai tetap disimpan.")));
                     return Ok(TurnOutcome::declined("Stopped the part you had not allowed."));
+                }
+                // A newly approved GitHub skill is available in this same
+                // turn, without restarting Muse or waiting for a new chat.
+                if call.name == "install_github_skill" && !tool_outcome::is_failure(&result) {
+                    if let Some(alias) = result.strip_prefix("installed_skill: ")
+                        .and_then(|v| v.lines().next()).map(str::trim)
+                    {
+                        if let Some(dir) = &session.skills_directory {
+                            if let Ok(store) = muse_store::SkillStore::new(dir) {
+                                let (content, aliases) = store.expand(&format!("@{alias}"));
+                                if !content.is_empty() && !applied_skills.contains(&alias.to_string()) {
+                                    if let Some(first) = messages.first_mut() {
+                                        if let Some(system) = first.get("content").and_then(Value::as_str) {
+                                            let new_system = format!("{system}\n\n{content}");
+                                            first["content"] = json!(new_system);
+                                        }
+                                    }
+                                    applied_skills.push(alias.to_string());
+                                    obs.emit(AgentEvent::new("skill", format!("Menerapkan skill baru: @{alias}")));
+                                }
+                                let _ = aliases;
+                            }
+                        }
+                    }
                 }
                 if !tool_outcome::is_failure(&result) {
                     if matches!(call.name.as_str(), "write_file" | "edit_file")

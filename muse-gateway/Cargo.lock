@@ -1237,11 +1237,13 @@ name = "muse-agent"
 version = "0.9.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "hex",
  "libc",
  "muse-store",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

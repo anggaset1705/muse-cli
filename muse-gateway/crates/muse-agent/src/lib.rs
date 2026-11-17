@@ -23,6 +23,8 @@
 
 pub mod approval;
 pub mod code_quality;
+pub mod github_skills;
+pub mod studio;
 pub mod chat_turn;
 pub mod context;
 pub mod driver;

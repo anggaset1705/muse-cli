@@ -14,7 +14,7 @@
 // (C7, re-read before write), CRLF preservation, "Ask Muse" (C9),
 // unified diff in Changes (C11), background terminal + send result to
 // the agent (D2/D5), output cap (D4), Ctrl+S / Ctrl+Tab (K2).
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   ChevronDown,
@@ -41,6 +41,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeEditor } from "@/components/CodeEditor";
+import type { LiveFileEdit } from "@/lib/liveFileEdit";
+import { changedLineMarkers } from "@/lib/liveEditDiff";
+import { inlineEditFrame, planInlineEdit } from "@/lib/liveEditPlayback";
+import { highlightCodeDiff, highlightToolOutput } from "@/lib/toolOutputHighlight";
+import { typewriterStepSize, TYPEWRITER_TICK_MS } from "@/lib/typewriter";
 import type { AgentScreenStatus, DesktopWindow, FileChange, FileEntry, Settings } from "@/lib/types";
 import { formatSize } from "@/lib/types";
 import {
@@ -70,6 +75,8 @@ interface Props {
   onRevertAgentChange: (c: FileChange) => Promise<void>;
   /** Bumped by App after an agent turn so the file tree refreshes. */
   refreshSignal: number;
+  /** Real prepared existing-file edit, streamed via verified agent tool events. */
+  liveFileEdit: LiveFileEdit | null;
   onShellChange: (shell: string) => void;
   onCollapsedChange: (collapsed: boolean) => void;
   collapsed: boolean;
@@ -105,6 +112,7 @@ function FileTree({
   loadingDirs,
   onToggleDir,
   onOpen,
+  selectedRel,
 }: {
   entries: FileEntry[];
   depth: number;
@@ -112,11 +120,13 @@ function FileTree({
   loadingDirs: Record<string, boolean>;
   onToggleDir: (f: FileEntry) => void;
   onOpen: (f: FileEntry) => void;
+  selectedRel: string | null;
 }) {
   return (
     <div>
       {entries.map((e) => {
         const isOpen = !!openDirs[e.rel];
+        const selected = selectedRel !== null && selectedRel.replace(/\\/g, "/") === e.rel.replace(/\\/g, "/");
         if (e.is_dir) {
           return (
             <div key={e.rel}>
@@ -135,7 +145,7 @@ function FileTree({
                 e.children === null ? (
                   <div className="py-0.5 pl-8 text-[12px] text-[#71717A]" style={{ paddingLeft: `${6 + (depth + 1) * 14 + 14}px` }}>…</div>
                 ) : (
-                  <FileTree entries={e.children ?? []} depth={depth + 1} openDirs={openDirs} loadingDirs={loadingDirs} onToggleDir={onToggleDir} onOpen={onOpen} />
+                  <FileTree entries={e.children ?? []} depth={depth + 1} openDirs={openDirs} loadingDirs={loadingDirs} onToggleDir={onToggleDir} onOpen={onOpen} selectedRel={selectedRel} />
                 )
               )}
             </div>
@@ -144,7 +154,8 @@ function FileTree({
         return (
           <button
             key={e.rel}
-            className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[12.5px] text-[#A1A1AA] hover:bg-[#292A34] hover:text-white"
+            aria-current={selected ? "true" : undefined}
+            className={"flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[12.5px] hover:bg-[#292A34] hover:text-white " + (selected ? "bg-[#30364A] text-[#F5F5F7]" : "text-[#A1A1AA]")}
             style={{ paddingLeft: `${6 + depth * 14 + 14}px` }}
             onClick={() => onOpen(e)}
             title={e.rel}
@@ -270,6 +281,138 @@ export function WorkspacePanel(props: Props) {
   const [openDiffs, setOpenDiffs] = useState<Record<string, boolean>>({});
 
   const isDirty = openFile !== null && edited !== openFile.content;
+  const liveEdit = props.liveFileEdit;
+  const editorCardRef = useRef<HTMLDivElement>(null);
+  const lastOpenedEditRef = useRef<number | null>(null);
+  const [blockedEditRevision, setBlockedEditRevision] = useState<number | null>(null);
+  const [dismissedEditRevision, setDismissedEditRevision] = useState<number | null>(null);
+  const [verifiedEditRevision, setVerifiedEditRevision] = useState<number | null>(null);
+  const [playbackWork, setPlaybackWork] = useState(0);
+
+  // The real edit is shown in the SAME CodeMirror editor as manual Files.
+  // A second, detached editor card is never created.
+  const nativePath = liveEdit?.path.replace(/\\/g, "/") ?? "";
+  const safeNativePath = nativePath && !nativePath.startsWith("/")
+    && !/^[A-Za-z]:\//.test(nativePath)
+    && nativePath.split("/").every((part) => part !== ".." && part !== ".");
+  const liveInEditor = !!liveEdit
+    && !!safeNativePath
+    && blockedEditRevision !== liveEdit.revision
+    && dismissedEditRevision !== liveEdit.revision
+    && openFile?.rel.replace(/\\/g, "/") === nativePath;
+  const livePlan = useMemo(
+    () => liveEdit?.status === "applied" && liveEdit.after.length > 0
+      ? planInlineEdit(liveEdit.before, liveEdit.after) : null,
+    [liveEdit?.revision, liveEdit?.before, liveEdit?.after, liveEdit?.status],
+  );
+  const liveFrame = useMemo(
+    () => livePlan ? inlineEditFrame(livePlan, playbackWork) : null,
+    [livePlan, playbackWork],
+  );
+  const playingNativeEdit = liveInEditor && liveEdit?.status === "applied"
+    && !!liveFrame && !liveFrame.done;
+  const verifiedNativeEdit = liveInEditor && liveEdit?.status === "applied"
+    && verifiedEditRevision === liveEdit.revision;
+  const inlinePreview = liveInEditor && !verifiedNativeEdit;
+  const inlineValue = inlinePreview
+    ? liveEdit?.status === "applied" && liveFrame
+      ? liveFrame.text
+      : liveEdit?.before ?? ""
+    : edited;
+  const inlineMarkers = useMemo(
+    () => liveInEditor && !isDirty && liveEdit
+      ? changedLineMarkers(liveEdit.before, inlinePreview ? inlineValue : liveEdit.after)
+      : undefined,
+    [liveInEditor, isDirty, liveEdit?.before, liveEdit?.after, inlinePreview, inlineValue],
+  );
+  const confirmedMarkers = useMemo(
+    () => liveEdit ? changedLineMarkers(liveEdit.before, liveEdit.after) : undefined,
+    [liveEdit?.before, liveEdit?.after],
+  );
+
+  // Open only once per confirmed native edit. Protect unsaved manual work.
+  useEffect(() => {
+    if (!liveEdit || lastOpenedEditRef.current === liveEdit.revision) return;
+    lastOpenedEditRef.current = liveEdit.revision;
+    setPlaybackWork(0);
+    setVerifiedEditRevision(null);
+    if (!safeNativePath) {
+      setBlockedEditRevision(liveEdit.revision);
+      setNotice(lang === "id"
+        ? "Muse menerima jalur file tidak aman; editor tidak dibuka."
+        : "Unsafe file path from Muse; editor not opened.");
+      return;
+    }
+    if (isDirty) {
+      setBlockedEditRevision(liveEdit.revision);
+      setNotice(lang === "id"
+        ? "Perubahan Muse tersedia, tetapi draft editor belum disimpan. Draft Anda dipertahankan."
+        : "Muse edited a file, but your unsaved draft is preserved.");
+      return;
+    }
+    setBlockedEditRevision(null);
+    setDismissedEditRevision(null);
+    setOpenFile({ rel: nativePath, content: liveEdit.before });
+    setEdited(liveEdit.before);
+    setBaselineCrlf(liveEdit.before.includes("\r\n"));
+    setFileError(null);
+    setFileChanged(false);
+    window.requestAnimationFrame(() => {
+      editorCardRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+    // Only trigger on a NEW native revision, never on incoming chunks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveEdit?.revision]);
+
+  // Display actual prepared edit hunks at their original line positions.
+  // The real filesystem write remains atomic; visual typing is a replay
+  // of genuine prepared text, NOT a claim of per-character disk writes.
+  useEffect(() => {
+    if (!liveInEditor || !livePlan || liveEdit?.status !== "applied"
+      || verifiedEditRevision === liveEdit.revision) return;
+    if (livePlan.work === 0) {
+      setPlaybackWork(0);
+      return;
+    }
+    // Use the same visible cadence as chat and new-script code cards.
+    // Real validated file saves remain atomic; only the preview is paced.
+    const timer = window.setInterval(() => {
+      setPlaybackWork((work) => Math.min(
+        livePlan.work, work + typewriterStepSize(livePlan.work - work),
+      ));
+    }, TYPEWRITER_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [liveEdit?.revision, liveEdit?.status, livePlan, liveInEditor, verifiedEditRevision]);
+
+  // Once the real edit has been shown, verify it against disk then update
+  // the normal editor baseline so Save and stale-read guards still work.
+  useEffect(() => {
+    if (!liveInEditor || !liveEdit || liveEdit.status !== "applied"
+      || !liveFrame?.done || verifiedEditRevision === liveEdit.revision || !root) return;
+    let cancelled = false;
+    const revision = liveEdit.revision;
+    void invoke<{ rel: string; content: string; size: number }>("read_workspace_file", {
+      root, rel: nativePath,
+    }).then((res) => {
+      if (cancelled) return;
+      if (res.content.replace(/\r\n/g, "\n") !== liveEdit.after.replace(/\r\n/g, "\n")) {
+        setFileError(lang === "id"
+          ? "Isi file di disk berbeda dari perubahan Muse. Muat ulang sebelum mengedit."
+          : "Disk file differs from Muse's prepared changes. Reload before editing.");
+        return;
+      }
+      setOpenFile({ rel: res.rel, content: res.content });
+      setEdited(res.content);
+      setBaselineCrlf(res.content.includes("\r\n"));
+      setFileChanged(false);
+      setVerifiedEditRevision(revision);
+      void refreshTree();
+    }).catch((e) => {
+      if (!cancelled) setFileError(String(e));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveEdit?.revision, liveEdit?.status, liveFrame?.done, liveInEditor, verifiedEditRevision, root]);
 
   // C8 — report dirty state upward so App can mirror it to the Rust
   // close guard (set_editor_dirty); closing the app then asks first.
@@ -512,11 +655,13 @@ export function WorkspacePanel(props: Props) {
 
   const openFileEntry = async (f: FileEntry) => {
     if (openFile && f.rel !== openFile.rel && !confirmDiscard()) return;
+    if (liveEdit) setDismissedEditRevision(liveEdit.revision);
     await loadFile(f.rel);
   };
 
   const closeEditor = () => {
     if (!confirmDiscard()) return;
+    if (liveEdit) setDismissedEditRevision(liveEdit.revision);
     setOpenFile(null);
     setEdited("");
     setFileError(null);
@@ -670,14 +815,33 @@ export function WorkspacePanel(props: Props) {
           <TabsContent value="files" className="mt-0 min-h-0 flex-1 overflow-y-auto px-2 py-2">
             {treeLoading && <p className="px-2 text-[12px] text-[#71717A]">{t(lang, "loading")}</p>}
             {treeError && <p className="px-2 text-[12px] text-red-300">{treeError}</p>}
-            <FileTree entries={tree} depth={0} openDirs={openDirs} loadingDirs={loadingDirs} onToggleDir={(f) => void toggleDir(f)} onOpen={(f) => void openFileEntry(f)} />
+            <FileTree entries={tree} depth={0} openDirs={openDirs} loadingDirs={loadingDirs} onToggleDir={(f) => void toggleDir(f)} onOpen={(f) => void openFileEntry(f)} selectedRel={openFile?.rel ?? null} />
             {openFile && (
-              <div className="mt-3 overflow-hidden rounded-lg border border-[#343541]">
+              <div
+                ref={editorCardRef}
+                className={"mt-3 overflow-hidden rounded-lg border " + (liveInEditor ? "border-[#3867F5]/55" : "border-[#343541]")}
+                data-live-edit-file={liveInEditor ? nativePath : undefined}
+              >
                 <div className="flex items-center gap-2 bg-[#292A34] px-2.5 py-2">
                   <FileText className="h-4 w-4 shrink-0 text-[#A1A1AA]" />
                   <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[#A1A1AA]" title={openFile.rel}>
                     {openFile.rel}{isDirty ? t(lang, "editorUnsaved") : ""}
                   </span>
+                  {liveInEditor && (
+                    <span
+                      className={"shrink-0 text-[10px] font-medium " + (
+                        liveEdit?.status === "failed" ? "text-red-300"
+                          : verifiedNativeEdit ? "text-emerald-400" : "text-[#8aa8ff]")}
+                    >
+                      {liveEdit?.status === "failed"
+                        ? (lang === "id" ? "Edit gagal" : "Edit failed")
+                        : verifiedNativeEdit
+                          ? (lang === "id" ? "Tersimpan" : "Saved")
+                          : playingNativeEdit
+                            ? (lang === "id" ? "Menampilkan perubahan…" : "Showing edits…")
+                            : (lang === "id" ? "Muse mengedit…" : "Muse editing…")}
+                    </span>
+                  )}
                   <Button
                     size="sm"
                     variant="outline"
@@ -687,7 +851,7 @@ export function WorkspacePanel(props: Props) {
                   >
                     <MessageSquarePlus className="h-3.5 w-3.5" /> {t(lang, "askMuse")}
                   </Button>
-                  <Button size="sm" className="h-7 bg-[#3867F5] text-white hover:bg-[#2f5ae0]" onClick={() => void saveOpenFile()} title={`${t(lang, "save")} (Ctrl+S)`}>
+                  <Button size="sm" className="h-7 bg-[#3867F5] text-white hover:bg-[#2f5ae0]" disabled={inlinePreview} onClick={() => { if (!inlinePreview) void saveOpenFile(); }} title={`${t(lang, "save")} (Ctrl+S)`}>
                     <Save className="h-3.5 w-3.5" /> {t(lang, "save")}
                   </Button>
                   <Button variant="ghost" size="icon" className="h-7 w-7" onClick={closeEditor} title={t(lang, "close")} aria-label={t(lang, "close")}>
@@ -705,11 +869,34 @@ export function WorkspacePanel(props: Props) {
                   </div>
                 )}
                 <CodeEditor
-                  value={edited}
+                  key={openFile.rel + (inlinePreview ? ":" + liveEdit?.revision : ":manual")}
+                  value={inlineValue}
                   onChange={setEdited}
                   fileRel={openFile.rel}
-                  onSave={() => void saveOpenFile()}
+                  onSave={() => { if (!inlinePreview) void saveOpenFile(); }}
+                  readOnly={inlinePreview}
+                  markers={inlineMarkers}
+                  followLatest={inlinePreview}
+                  followLine={inlinePreview ? liveFrame?.focusLine ?? undefined : undefined}
                 />
+                {liveInEditor && confirmedMarkers && (
+                  <div className="border-t border-[#343541] px-2.5 py-2 text-[11px] text-[#A1A1AA]">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="text-emerald-400">+{confirmedMarkers.added.length} {lang === "id" ? "ditambah" : "added"}</span>
+                      <span className="text-amber-300">~{confirmedMarkers.modified.length} {lang === "id" ? "diubah" : "modified"}</span>
+                      <span className="text-red-300">−{confirmedMarkers.removed} {lang === "id" ? "diganti/dihapus" : "replaced/removed"}</span>
+                    </div>
+                    {liveEdit?.diff && (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-[#8aa8ff]">{lang === "id" ? "Lihat detail perubahan" : "View edit details"}</summary>
+                        <pre
+                          className="md-body mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words bg-[#17171D] p-2 font-mono text-[10px]"
+                          dangerouslySetInnerHTML={{ __html: highlightCodeDiff(liveEdit.diff.slice(0, 100_000), liveEdit.path) }}
+                        />
+                      </details>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </TabsContent>
@@ -745,9 +932,10 @@ export function WorkspacePanel(props: Props) {
                       </Button>
                     </div>
                     {c.diff && openDiffs[c.id] && (
-                      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]">
-                        {c.diff.slice(0, 20000)}
-                      </pre>
+                      <pre
+                        className="md-body mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]"
+                        dangerouslySetInnerHTML={{ __html: highlightCodeDiff(c.diff.slice(0, 20000), c.rel) }}
+                      />
                     )}
                   </li>
                 ))}
@@ -795,9 +983,10 @@ export function WorkspacePanel(props: Props) {
               {t(lang, "runInBackground")}
             </label>
             <div ref={termOutRef} className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[#343541] bg-[#17171D] p-2.5">
-              <pre className="whitespace-pre-wrap font-mono text-[11.5px] leading-relaxed text-[#A1A1AA]">
-                {termOutput ? termOutput.slice(-MAX_DISPLAY_OUTPUT) : "$ " + (termCmd || "—")}
-              </pre>
+              <pre
+                className="md-body whitespace-pre-wrap font-mono text-[11.5px] leading-relaxed text-[#A1A1AA]"
+                dangerouslySetInnerHTML={{ __html: highlightToolOutput("run_command", termOutput ? termOutput.slice(-MAX_DISPLAY_OUTPUT) : "$ " + (termCmd || "—")) }}
+              />
             </div>
             {termFinished && termOutput.trim() && (
               <Button

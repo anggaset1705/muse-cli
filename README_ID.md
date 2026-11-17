@@ -2,7 +2,7 @@
 
 Aplikasi desktop untuk **Muse**, dibangun dari nol dengan [Tauri](https://tauri.app/) + Rust.
 
-Ngobrol dengan Muse dari aplikasi Windows: banyak akun Muse sekaligus, kuota otomatis pindah ke akun berikutnya kalau satu akun habis, skill `@alias`, pratinjau Screen, terminal bawaan, dan widget usage yang nunjukin sisa kuota — tampilannya bisa Bahasa Inggris atau Bahasa Indonesia.
+Ngobrol dengan Muse dari aplikasi Windows: banyak akun Muse sekaligus, kuota otomatis pindah ke akun berikutnya kalau satu akun habis, skill yang aktif otomatis, pratinjau Screen, terminal bawaan, dan widget usage yang nunjukin sisa kuota — tampilannya bisa Bahasa Inggris atau Bahasa Indonesia.
 
 > **Bukan aplikasi resmi.** Muse CLI itu aplikasi pihak ketiga. Tidak dibuat oleh, tidak terafiliasi, dan tidak didukung oleh Muse. Lihat [Disclaimer](#disclaimer).
 
@@ -14,7 +14,7 @@ Jendela utama (tema gelap, widget usage di sidebar):
 
 ![Jendela utama Muse CLI](docs/images/main-window.png)
 
-Pengaturan skill — nambah skill `@alias` lokal:
+Pengaturan skill — server skill untuk agent loop dan daftar `@alias` lokal:
 
 ![Pengaturan skill](docs/images/skills-settings.png)
 
@@ -25,7 +25,7 @@ Pengaturan skill — nambah skill `@alias` lokal:
   1. Kuota mingguan, antar akun secara berurutan (akun yang kuota mingguannya habis dilewati dulu sampai tanggal resetnya).
   2. Kuota ekstra, antar akun secara berurutan.
   3. Kehabisan kuota — muncul pesan error yang jelas kalau kuota mingguan + ekstra di semua akun sudah habis.
-- **Skill (`@alias`)** — bikin skill lokal dari file `.md` terus panggil pakai alias (misalnya `@my-skill`) langsung dari kotak chat. Skill server bisa ditambah lewat Import skill file.
+- **Skill (otomatis)** — pasang skill ke agent loop dari Settings → **Skills** (**Import skill file**, atau minta agent mencarikan di GitHub — pemasangannya butuh persetujuanmu). Tiap pesan otomatis memakai sampai 3 skill yang cocok, dicocokkan dari kata-katamu dengan nama dan deskripsi tiap skill — tanpa panggilan model tambahan, dan skill yang dimatikan dilewati. Ketik `@alias` untuk memaksa skill tertentu. Isi tiap skill dibatasi 12.000 karakter (30.000 per pesan). Daftar `@alias` lokal di Settings hanya untuk referensi.
 - **Screen** — lihat pratinjau jendela dari tab Screen sambil kerja.
 - **Terminal** — ada terminal bawaan (PowerShell) di tab Terminal.
 - **Widget usage** — sidebar nunjukin paket, kuota mingguan terpakai (%), tanggal reset, dan sisa token ekstra. Diperbarui waktu dibuka atau lewat tombol Refresh.
@@ -89,7 +89,7 @@ muse-cli/
 - **Login** — waktu pertama dibuka, muncul dialog "Connect your Muse account". Klik **Sign in inside the app**, login di halaman Muse, akun langsung tersimpan otomatis.
 - **Tambah akun lain** — Settings → **Add account** (atau **Other account** di dialog connect), lalu login dengan akun Muse kedua.
 - **Chat** — pilih project/workspace, ketik pesan, tekan Enter. Balasan Muse ngikutin bahasa yang kamu pakai.
-- **Skill** — Settings → **Skills (local @alias list)**: isi alias (misalnya `@my-skill`) dan path atau catatan, klik **Add**, lalu ketik `@my-skill` di kotak chat. Buat nambah skill server, pakai **Import skill file**.
+- **Skill** — Settings → **Skills**: **Import skill file** menambah skill ke agent loop (server skill). Loop memilih skill yang cocok secara otomatis tiap giliran, atau ketik `@my-skill` untuk memaksa satu skill. Daftar `@alias` lokal di bawahnya hanya untuk referensi.
 - **Screen / Terminal** — pakai tab **Screen** buat pratinjau jendela dan tab **Terminal** buat terminal, dua-duanya di panel workspace sebelah kanan.
 - **Cek kuota** — kotak **Usage** di bawah MODEL di sidebar nunjukin paket, kuota mingguan terpakai, tanggal reset, dan sisa token ekstra. Klik ikon refresh buat memperbarui.
 

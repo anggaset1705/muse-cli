@@ -26,6 +26,7 @@ import {
 import { Sidebar } from "@/components/Sidebar";
 import { ChatPanel } from "@/components/ChatPanel";
 import { WorkspacePanel, type WorkspaceTab } from "@/components/WorkspacePanel";
+import type { LiveFileEdit } from "@/lib/liveFileEdit";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { LoginDialog } from "@/components/LoginDialog";
 import type {
@@ -158,6 +159,11 @@ function App() {
   const [goalActive, setGoalActive] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [filesVersion, setFilesVersion] = useState(0);
+  // Existing project files are previewed in the right editor from
+  // actual prepared edit events. New files still type in chat cards.
+  const [liveFileEdit, setLiveFileEdit] = useState<(LiveFileEdit & { conversationId: string }) | null>(null);
+  const liveEditTargetRef = useRef<{ tool: string; path: string } | null>(null);
+  const liveEditRevisionRef = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
   /** How LoginDialog should open: plain restore (default) or "add account"
@@ -962,12 +968,19 @@ function App() {
 
         // Stream the turn; resolves on the `done` event.
         let full = "";
+        let editingTurn = false;
+        liveEditTargetRef.current = null;
         const actions: ToolActionState[] = [];
         const outcome = await new Promise<{ ok: boolean; summary: string; status: string }>((resolve, reject) => {
           const pushActions = () => setStreamingActions([...actions]);
           const markTool = (tool: string, status: ToolActionState["status"], result?: string) => {
             for (let i = actions.length - 1; i >= 0; i--) {
-              if (actions[i].tool === tool && (actions[i].status === "running" || actions[i].status === "pending")) {
+              if (
+                actions[i].tool === tool &&
+                (actions[i].status === "running" ||
+                  actions[i].status === "pending" ||
+                  actions[i].status === "awaiting_approval")
+              ) {
                 actions[i] = {
                   ...actions[i],
                   status,
@@ -996,7 +1009,7 @@ function App() {
                       full += ev.text;
                       // Hide a raw JSON envelope while it streams in;
                       // show just its summary once it parses.
-                      setStreamingText(streamingReplyDisplay(full));
+                      if (!editingTurn) setStreamingText(streamingReplyDisplay(full));
                     }
                     break;
                   case "assistant":
@@ -1012,7 +1025,7 @@ function App() {
                     // when `visible` was empty — i.e. exactly when the
                     // step was a pure tool-call reply.)
                     full = ev.text ?? "";
-                    setStreamingText(streamingReplyDisplay(full));
+                    if (!editingTurn) setStreamingText(streamingReplyDisplay(full));
                     break;
                   case "tool_start":
                     actions.push({
@@ -1033,12 +1046,61 @@ function App() {
                       }
                     }
                     break;
+                  case "tool_edit_begin": {
+                    // Sent ONLY for a prepared modification of an existing
+                    // file (original_text from the native executor). No
+                    // browser/model guesses and no disk writes from the UI.
+                    const editPath = ev.path?.trim();
+                    const editTool = ev.tool;
+                    if (editPath && (editTool === "write_file" || editTool === "edit_file")) {
+                      liveEditTargetRef.current = { tool: editTool, path: editPath };
+                      editingTurn = true;
+                      setStreamingText(""); // thinking stays active, final reply waits for the real result.
+                      setLiveFileEdit({
+                        conversationId: conv.id,
+                        path: editPath,
+                        revision: ++liveEditRevisionRef.current,
+                        tool: editTool,
+                        before: "",
+                        after: "",
+                        diff: ev.text ?? "",
+                        status: "preparing",
+                      });
+                      setWorkspaceTab("files");
+                      setRightCollapsed(false);
+                    }
+                    break;
+                  }
+                  case "tool_edit_before": {
+                    const target = liveEditTargetRef.current;
+                    if (target && target.path === ev.path && target.tool === ev.tool) {
+                      setLiveFileEdit((prev) =>
+                        prev && prev.conversationId === conv.id && prev.path === target.path
+                          ? { ...prev, before: prev.before + (ev.text ?? "") }
+                          : prev,
+                      );
+                    }
+                    break;
+                  }
                   case "tool_content":
                     // Live-typed code for a write/edit card (13 Nov 2026):
                     // the gateway streams the file's after-text in
                     // chunks before the write executes; the card types
                     // it out live. Append to the running action with
-                    // the same tool (+path when the event carries one).
+                    // with the same tool (+path when the event carries one).
+                    // Existing-file edits go to the right editor; new files
+                    // retain the chat code card and its typewriter.
+                    if (
+                      liveEditTargetRef.current?.tool === ev.tool &&
+                      liveEditTargetRef.current?.path === ev.path
+                    ) {
+                      setLiveFileEdit((prev) =>
+                        prev && prev.conversationId === conv.id && prev.path === ev.path
+                          ? { ...prev, after: prev.after + (ev.text ?? "") }
+                          : prev,
+                      );
+                      break;
+                    }
                     for (let i = actions.length - 1; i >= 0; i--) {
                       if (
                         actions[i].tool === (ev.tool ?? "tool") &&
@@ -1060,6 +1122,18 @@ function App() {
                       (ev.text ?? "").startsWith("error:") ? "error" : "done",
                       ev.text,
                     );
+                    if (
+                      liveEditTargetRef.current?.tool === ev.tool &&
+                      liveEditTargetRef.current?.path === ev.path
+                    ) {
+                      const isFailure = (ev.text ?? "").startsWith("error:");
+                      setLiveFileEdit((prev) =>
+                        prev && prev.conversationId === conv.id && prev.path === ev.path
+                          ? { ...prev, status: isFailure ? "failed" : "applied", result: ev.text }
+                          : prev,
+                      );
+                      liveEditTargetRef.current = null;
+                    }
                     break;
                   case "skill":
                     actions.push({ tool: "skill", description: ev.text, status: "done" });
@@ -1408,6 +1482,9 @@ function App() {
             displayedTextRef={streamingDisplayedRef}
             streamingPlan={streamingPlan}
             streamingActions={streamingActions}
+            studioSessionId={active ? agentSessionsRef.current[active.id]?.id ?? null : null}
+            gatewayBaseUrl={effectiveBase}
+            gatewayApiKey={settings.apiKey}
             streamingThoughts={streamingThoughts}
             goalActive={goalActive}
             pendingApproval={pendingApproval}
@@ -1456,6 +1533,7 @@ function App() {
               onUndoChange={undoChange}
               onRevertAgentChange={(c) => revertAgentChange(c)}
               refreshSignal={filesVersion}
+              liveFileEdit={liveFileEdit?.conversationId === activeId ? liveFileEdit : null}
               onShellChange={(shell) => setSettings((s) => ({ ...s, shell }))}
               onCollapsedChange={setRightCollapsed}
               collapsed={rightCollapsed}

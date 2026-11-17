@@ -190,6 +190,7 @@
 .theme-light .md-body .tok-tag { color: #800000; }
 .theme-light .md-body .tok-attr { color: #ff0000; }
 .theme-light .md-body .tok-punc { color: #000000; }
+.theme-light .md-body .tok-err { color: #b42318; }
 .theme-light .md-body .md-link { color: #2563eb; }
 .theme-light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
 .theme-light .typewriter-cursor { color: #2563eb; animation: blink 1s step-end infinite; }
@@ -311,6 +312,7 @@
 .md-body .tok-tag { color: #569cd6; }
 .md-body .tok-attr { color: #9cdcfe; }
 .md-body .tok-punc { color: #808080; }
+.md-body .tok-err { color: #f87171; }
 .md-body .md-pre code {
   display: block;
   padding: 0.8em;

@@ -15,7 +15,7 @@ function check(label,fn){try{fn();passed++;console.log("  PASS "+label);}catch(e
 
 check("slower actual intervals and bounded tiers",()=>{
   assert.ok(typewriter.TYPEWRITER_TICK_MS >= 22 && typewriter.TYPEWRITER_TICK_MS<=40);
-  assert.deepEqual([90,601,2001].map(typewriter.typewriterStepSize),[1,2,4]);
+  assert.deepEqual([90,601,2001].map(typewriter.typewriterStepSize),[2,3,4]);
   let cur="";const target="x".repeat(1334);let ticks=0;
   while(cur.length<target.length && ticks<3000){
     const next=typewriter.liveContentStep(target,cur);
@@ -24,7 +24,7 @@ check("slower actual intervals and bounded tiers",()=>{
   }
   assert.equal(cur,target);
   const duration=ticks*typewriter.TYPEWRITER_TICK_MS;
-  assert.ok(duration>=15000 && duration<=35000,"1334 chars in "+duration+"ms");
+  assert.ok(duration>=9000 && duration<=22000,"1334 chars in "+duration+"ms");
   console.log("    (1334 chars ~"+(duration/1000).toFixed(1)+"s)");
 });
 check("Vite-loaded JavaScript typewriter mirrors the TypeScript engine",()=>{

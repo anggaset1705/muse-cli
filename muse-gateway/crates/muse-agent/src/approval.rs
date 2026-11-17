@@ -24,6 +24,12 @@ pub enum ApprovalMode {
 /// path components and file names.
 pub fn requires_explicit_approval(call: &ToolCall) -> bool {
     let call = crate::parser::normalize(call);
+    // Third-party skill installation always requires explicit approval,
+    // even with Turbo enabled. Search-only is read-only.
+    if call.name == "install_github_skill" { return true; }
+    // Media generation may consume account quota or create long-running
+    // jobs. Always ask before starting a render, including Turbo mode.
+    if matches!(call.name.as_str(),"studio_render_project" | "studio_render_image" | "studio_compose") { return true; }
     if matches!(
         call.name.as_str(),
         "run_command" | "process_input" | "process_stop"

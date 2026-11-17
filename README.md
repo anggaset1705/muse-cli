@@ -2,7 +2,7 @@
 
 A desktop client for **Muse**, built from scratch with [Tauri](https://tauri.app/) + Rust.
 
-Chat with Muse from a native Windows app: multiple Muse accounts, automatic quota fallback across your accounts, `@alias` skills, a Screen preview, a built-in terminal, and a live usage widget — with the UI in English or Bahasa Indonesia.
+Chat with Muse from a native Windows app: multiple Muse accounts, automatic quota fallback across your accounts, skills that switch on automatically, a Screen preview, a built-in terminal, and a live usage widget — with the UI in English or Bahasa Indonesia.
 
 > **Not official.** Muse CLI is a third-party app. It is not affiliated with, endorsed by, or connected to Muse. See [Disclaimer](#disclaimer).
 
@@ -14,7 +14,7 @@ Main window (dark theme, usage widget in the sidebar):
 
 ![Muse CLI main window](docs/images/main-window.png)
 
-Skills settings — add a local `@alias` skill:
+Skills settings — server skills for the agent loop and the local `@alias` list:
 
 ![Skills settings](docs/images/skills-settings.png)
 
@@ -25,7 +25,7 @@ Skills settings — add a local `@alias` skill:
   1. Weekly quota, across accounts in order (an exhausted account stays locked until its reset date).
   2. Extra quota, across accounts in order.
   3. Out of credit — a clear error when weekly + extra quota are exhausted on every account.
-- **Skills (`@alias`)** — define local skills as `.md` files and call them by alias (for example `@my-skill`) right from the chat box. Server skills can be imported from a skill file.
+- **Skills (automatic)** — install skills into the agent loop from Settings → **Skills** (**Import skill file**, or ask the agent to find one on GitHub — installing one needs your approval). Each message automatically picks up to 3 matching skills by comparing your words with each skill's name and description — no extra model call, and disabled skills are skipped. Type `@alias` to force a specific skill. A skill's content is capped at 12,000 characters (30,000 per message). The local `@alias` list in Settings is kept for reference only.
 - **Screen** — preview windows from the Screen tab while you work.
 - **Terminal** — a built-in terminal tab (PowerShell).
 - **Usage widget** — the sidebar shows your plan, weekly quota used (%), reset date, and extra tokens left. Refreshes on open or with the Refresh button.
@@ -89,7 +89,7 @@ muse-cli/
 - **Sign in** — on first launch, the "Connect your Muse account" dialog appears. Click **Sign in inside the app**, sign in on the Muse page, and the account is saved automatically.
 - **Add another account** — Settings → **Add account** (or **Other account** in the connect dialog), then sign in with the second Muse account.
 - **Chat** — pick a project/workspace, type your message, and press Enter. Replies follow the language you wrote in.
-- **Skills** — Settings → **Skills (local @alias list)**: enter an alias (for example `@my-skill`) and a path or note, click **Add**, then type `@my-skill` in the chat box. Use **Import skill file** to add a server skill.
+- **Skills** — Settings → **Skills**: **Import skill file** adds a skill to the agent loop (server skills). The loop picks relevant skills automatically each turn, or type `@my-skill` to force one. The local `@alias` list below it is for reference only.
 - **Screen / Terminal** — use the **Screen** tab to preview windows and the **Terminal** tab for a terminal, both in the right-hand workspace panel.
 - **Check your quota** — the **Usage** box under MODEL in the sidebar shows the plan, weekly quota used, reset date, and extra tokens left. Click the refresh icon to update it.
 

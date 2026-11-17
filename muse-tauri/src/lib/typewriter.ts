@@ -1,5 +1,5 @@
 // Typewriter engine (A3, port of WinForms ChatTranscript: 24 ms tick,
-// 1-4 chars/tick). Pure functions — no React — so the tick logic can be
+// 2-4 chars/tick). Pure functions — no React — so the tick logic can be
 // unit-tested in Node; ChatPanel's interval just calls typewriterStep().
 //
 // MIRROR: typewriter.js next to this file is the copy Vite bundles
@@ -43,15 +43,14 @@ export function safeCut(target: string, n: number): string {
   return cut;
 }
 
-/** Chars added per 24 ms tick. 1-4 chars/tick like muse.exe, so a ~90 char
- * reply takes ~0.5 s to type out and stays visibly live; the catch-up
- * tiers stay small on purpose — a ~1000-char reply must take several
- * visible seconds, not ~1 s (the old 30/60 tiers finished a 1584-char
- * reply in 0.40 s). A ~6 KB file types out in ~8 s at the top tier. */
+/** Shared visible reveal pace: 2/3/4 characters per 24 ms tick.
+ * Normal short chat replies become twice as responsive; the live existing-
+ * file diff editor now uses this same bounded pace instead of revealing
+ * 12-120 characters every 32 ms. This is display only, not disk I/O. */
 export function typewriterStepSize(gap: number): number {
   if (gap > 2000) return 4;
-  if (gap > 600) return 2;
-  return 1;
+  if (gap > 600) return 3;
+  return 2;
 }
 
 /**

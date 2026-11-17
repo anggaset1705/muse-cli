@@ -18,6 +18,7 @@ mod cors;
 mod errors;
 mod routes;
 mod state;
+mod studio_progress;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

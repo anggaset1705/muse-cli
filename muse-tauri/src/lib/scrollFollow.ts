@@ -17,6 +17,9 @@ export function reconcileScrollFollow(
   metrics: ScrollMetrics,
   threshold = 64,
 ): boolean {
-  if (following && !userInitiated) return true;
-  return isNearScrollBottom(metrics, threshold);
+  // A programmatic scroll event after a layout update may NOT undo a
+  // deliberate pause. A paused viewport resumes only after a genuine
+  // user scroll reaches the actual bottom, not merely "near" it.
+  if (!userInitiated) return following;
+  return isNearScrollBottom(metrics, following ? threshold : 2);
 }

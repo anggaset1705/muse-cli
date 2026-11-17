@@ -170,7 +170,7 @@ check("S1 single delta (local-tools path): no rendered jump, typing takes second
   ]);
   assert.equal(saved, msg2212);
   assert.ok(maxRenderedJump <= 12, `max rendered jump ${maxRenderedJump} (want <= 12)`);
-  assert.ok(doneMs >= 15000, `done in ${doneMs}ms (want >= 3000ms of visible typing)`);
+  assert.ok(doneMs >= 10000, `done in ${doneMs}ms (want >= 3000ms of visible typing)`);
   assert.ok(doneMs <= 35000, `done in ${doneMs}ms (want <= 15000ms)`);
   // The code part must grow progressively, not appear whole.
   const codeTrace = trace.map(([, , rc]) => rc);
@@ -192,7 +192,7 @@ check("S2 chunked deltas (browser path): no rendered jump", () => {
   const { maxRenderedJump, doneMs, saved } = simulate(events);
   assert.equal(saved, msg2212);
   assert.ok(maxRenderedJump <= 12, `max rendered jump ${maxRenderedJump} (want <= 12)`);
-  assert.ok(doneMs >= 15000, `done in ${doneMs}ms`);
+  assert.ok(doneMs >= 10000, `done in ${doneMs}ms`);
   console.log(`    (S2: doneMs=${doneMs}, maxRenderedJump=${maxRenderedJump})`);
 });
 

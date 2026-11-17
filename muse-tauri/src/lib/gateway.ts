@@ -325,6 +325,7 @@ export function unwrapData<T>(body: unknown): T | undefined {
 // Auth is the same Bearer key as the other gateway endpoints.
 // ---------------------------------------------------------------------------
 
+import type { StudioProgressSnapshot } from "@/lib/studioProgress";
 import type {
   AgentChange,
   AgentPreferences,
@@ -379,6 +380,18 @@ export function createAgentSession(
 export function getAgentSession(baseUrl: string, apiKey: string, sessionId: string): Promise<AgentSessionView> {
   return agentFetch<AgentSessionView>(baseUrl, apiKey, `/v1/agent/sessions/${sessionId}`);
 }
+
+/** Read-only project status. Does not trigger media generation or spend quota. */
+export function getAgentStudioProgress(
+  baseUrl: string, apiKey: string, sessionId: string, projectId: string, signal?: AbortSignal,
+): Promise<StudioProgressSnapshot> {
+  return agentFetch<StudioProgressSnapshot>(
+    baseUrl, apiKey,
+    "/v1/agent/sessions/" + encodeURIComponent(sessionId) + "/studio/" + encodeURIComponent(projectId),
+    { signal },
+  );
+}
+
 
 export function deleteAgentSession(baseUrl: string, apiKey: string, sessionId: string): Promise<unknown> {
   return agentFetch<unknown>(baseUrl, apiKey, `/v1/agent/sessions/${sessionId}`, { method: "DELETE" });

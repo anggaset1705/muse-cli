@@ -131,6 +131,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(agent_approve),
         )
         .route("/v1/agent/sessions/{id}/changes", get(agent_changes))
+        .route("/v1/agent/sessions/{id}/studio/{projectId}", get(agent_studio_progress))
         .route("/v1/agent/sessions/{id}/revert", post(agent_revert))
         .route("/v1/agent/skills", get(agent_skills_list).post(agent_skill_import))
         .route(
@@ -2052,6 +2053,40 @@ async fn agent_session_get(
     Err(MuseError::not_found(format!("agent session '{id}' not found")))
 }
 
+/// Lightweight polling endpoint for native Studio video progress.
+/// Authenticated via the existing agent API key; project path is never
+/// accepted from the caller, only the workspace on this AgentSession.
+async fn agent_studio_progress(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, project_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let _caller = agent_auth(&state, &headers)?;
+    if project_id.len() > 48 || project_id.is_empty()
+        || !project_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b,b'_' | b'-'))
+    {
+        return Err(MuseError::invalid("Invalid Studio project identifier"));
+    }
+    let workspace = {
+        let mgr = state.sessions.lock().await;
+        let view = if let Ok(session) = mgr.get(&id) {
+            session.view()
+        } else {
+            let checked = state.checked_out.lock().unwrap();
+            checked.get(&id).map(|x| x.view.clone())
+                .ok_or_else(|| MuseError::not_found("Agent session not found"))?
+        };
+        view.get("workspace").and_then(Value::as_str).map(str::to_owned)
+            .ok_or_else(|| MuseError::not_found("Session workspace not available"))?
+    };
+    let root=std::path::Path::new(&workspace);
+    let project=muse_agent::studio::load(root, &project_id)
+        .map_err(|_|MuseError::not_found("Studio project not found in this session workspace"))?;
+    let tasks=state.tasks.lock().unwrap();
+    let view=crate::studio_progress::snapshot(&project,root,&tasks);
+    Ok(Json(view))
+}
+
 async fn agent_session_delete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2138,6 +2173,13 @@ async fn agent_chat(
             .insert(id.clone(), crate::state::CheckedOut { view, changes });
         session
     };
+    // Media Studio tools call only this authenticated local gateway.
+    // Do not place API keys in planner messages or persistent projects.
+    if let Ok(gateway) = muse_agent::studio::MediaGateway::new(
+        state.settings.port, state.settings.api_key.clone()
+    ) {
+        session.tools.set_studio_gateway(Some(gateway));
+    }
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let agent_driver = Arc::clone(&state.agent_driver);
     let state_for_task = Arc::clone(&state);

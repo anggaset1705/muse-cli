@@ -556,6 +556,72 @@ impl SkillStore {
     /// a `\n[... skill content truncated ...]` marker; the whole block
     /// stops growing at 30,000 chars (a skill that no longer fits ends the
     /// loop, like .NET's `break`).
+    /// Add a vetted Markdown skill from an immutable download snapshot.
+    /// The caller is responsible for reviewing the source before invoking it.
+    pub fn import_text(&self, fallback_alias: &str, text: &str) -> Result<SkillDefinition, StoreError> {
+        if text.len() > 128 * 1024 || text.trim().is_empty() || text.contains('\0') {
+            return Err(StoreError::invalid("SKILL.md is empty, binary, or exceeds 128 KiB"));
+        }
+        let (alias, _, _, _) = parse_skill(text, fallback_alias)?;
+        std::fs::create_dir_all(&self.directory)
+            .map_err(|e| StoreError::io_path(&self.directory, e))?;
+        let dest = self.directory.join(format!("{alias}.md"));
+        // Do not delete an installed folder-skill until the new text is saved.
+        std::fs::write(&dest, text).map_err(|e| StoreError::io_path(&dest, e))?;
+        self.remove_folder_skill(&alias);
+        self.set_enabled(&alias, true)?;
+        self.get(&alias).ok_or_else(|| StoreError::invalid("installed skill not found after write"))
+    }
+
+    /// Auto-selection is *additional* to @alias. Select at most 3 relevant
+    /// enabled skills, with no agent/network calls and no code execution.
+    pub fn expand_for_prompt(&self, prompt: &str) -> (String, Vec<String>) {
+        let lower = prompt.to_lowercase();
+        let tokenise = |s: &str| -> Vec<String> {
+            s.to_lowercase()
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .filter(|v| v.chars().count() >= 3)
+                .filter(|v| !matches!(*v,
+                    "skill"|"skills"|"agent"|"please"|"tolong"|"buat"|"buatkan"|
+                    "bikin"|"untuk"|"dengan"|"yang"|"dan"|"dari"|"kode"|"code"|
+                    "program"|"aplikasi"|"project"|"file"|"using"|"with"|"the"|
+                    "developer"|"development"|"build"|"create"|"help"|"use"|
+                    "website"|"web"|"app"|"this"|"that"|"bisa"|"saya"))
+                .map(str::to_string)
+                .collect()
+        };
+        let user_tokens = tokenise(&lower);
+        let explicit = Self::mentions(prompt);
+        let mut scored: Vec<(i32, String)> = Vec::new();
+        for def in self.list() {
+            if !self.is_enabled(&def.alias) || explicit.contains(&def.alias) { continue; }
+            let mut score = 0i32;
+            if def.alias.len() >= 3 && user_tokens.contains(&def.alias.to_lowercase()) {
+                score += 10;
+            }
+            for name in tokenise(&def.name) {
+                if user_tokens.contains(&name) { score += 7; }
+            }
+            for desc in tokenise(&def.description) {
+                if user_tokens.contains(&desc) { score += 4; }
+            }
+            if score >= 4 { scored.push((score, def.alias)); }
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut selection = prompt.to_string();
+        for (_, alias) in scored.into_iter().take(3usize.saturating_sub(explicit.len())) {
+            selection.push_str(&format!("\n@{alias}"));
+        }
+        let (mut block, aliases) = self.expand(&selection);
+        if !aliases.is_empty() && explicit.is_empty() {
+            block = block.replace(
+                "USER SKILLS REQUESTED FOR THIS TASK (@alias in the request).",
+                "SKILLS SELECTED FOR THIS TASK (explicit @alias or automatic relevance match)."
+            );
+        }
+        (block, aliases)
+    }
+
     pub fn expand(&self, prompt: &str) -> (String, Vec<String>) {
         let mut used: Vec<String> = Vec::new();
         let mut blocks: Vec<String> = Vec::new();
@@ -724,6 +790,26 @@ mod tests {
         assert!(s.get("fe").is_none());
         assert!(!s.remove("fe").unwrap());
         assert!(s.is_enabled("fe")); // re-import starts enabled
+    }
+
+    #[test]
+    fn auto_router_respects_relevance_explicit_and_disabled() {
+        let (s, _dir) = store("auto-router");
+        let python=s.import_text("python", "---\nname: Python Developer\ndescription: Create Tkinter calculator applications\n---\nAlways use readable code.\n").unwrap();
+        let react=s.import_text("react", "---\nname: React UI\ndescription: React frontend components\n---\nBuild reusable components.\n").unwrap();
+        assert_eq!(python.alias,"python");
+        assert_eq!(react.alias,"react");
+        let (block, selected)=s.expand_for_prompt("buatkan kalkulator Python dengan Tkinter");
+        assert_eq!(selected,vec!["python"]);
+        assert!(block.contains("Always use readable code."));
+        let (_,selected)=s.expand_for_prompt("Build React components please");
+        assert_eq!(selected,vec!["react"]);
+        s.set_enabled("react",false).unwrap();
+        assert!(s.expand_for_prompt("Build React components please").1.is_empty());
+        let (block,selected)=s.expand_for_prompt("say hello @python");
+        assert_eq!(selected,vec!["python"]);
+        assert!(block.contains("USER SKILLS REQUESTED FOR THIS TASK"));
+        assert!(s.expand_for_prompt("hello there").1.is_empty());
     }
 
     #[test]

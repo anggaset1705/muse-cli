@@ -6,11 +6,12 @@
 // escape-first tokenizer in @/lib/highlight. Highlighting only ever
 // runs on a complete fenced block — the typewriter holds an unclosed
 // fence at its opener, so a half block never reaches this renderer.
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { highlightCode, detectLang } from "@/lib/highlight";
 import { stripToolCallBlocks } from "@/lib/replyEnvelope";
 import { reconcileScrollFollow } from "@/lib/scrollFollow";
+import { isLiveCodeGrowth } from "@/lib/codeScrollFollow";
 import { t, type Lang } from "@/lib/i18n";
 
 function escapeHtml(s: string): string {
@@ -45,14 +46,53 @@ function CodeBlock({
   const codePreRef = useRef<HTMLPreElement>(null);
   const followCodeRef = useRef(true);
   const manualCodeScrollRef = useRef(false);
-  // Unlike Ran LiveCode, regular Markdown code had no nested auto-follow.
-  // Follow only live typing: do not jump archived code blocks to their ends.
+  const previousCodeRef = useRef<string | null>(null);
+  const codeGrowingRef = useRef(false);
+  // Markdown assistant code can KEEP typing after the gateway finishes its
+  // turn and streaming=false. Use actual growing content as evidence rather
+  // than relying solely on the current streaming flag.
+  // Crucially, this scroll state belongs to the CODE CARD, not the chat.
   useLayoutEffect(() => {
+    const previous = previousCodeRef.current;
+    codeGrowingRef.current = isLiveCodeGrowth(previous, code, followLiveCode);
+    previousCodeRef.current = code;
+    if (!codeGrowingRef.current || !followCodeRef.current) return;
     const el = codePreRef.current;
-    if (el && followLiveCode && followCodeRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    const frame = window.requestAnimationFrame(() => {
+      if (followCodeRef.current && codeGrowingRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [code, followLiveCode]);
+  // The highlighted HTML and wrapped lines can finish layout *after* React
+  // commits. Observe THIS inner code area so the caret remains visible even
+  // while the user scrolls the OUTER conversation up to read older messages.
+  useEffect(() => {
+    const el = codePreRef.current;
+    if (!el) return;
+    let frame = 0;
+    const requestFollow = () => {
+      if (!codeGrowingRef.current || !followCodeRef.current || frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        if (codeGrowingRef.current && followCodeRef.current) {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
+    };
+    const observer = new MutationObserver(requestFollow);
+    observer.observe(el, { childList: true, subtree: true, characterData: true });
+    const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(requestFollow);
+    if (resize) resize.observe(el.querySelector("code") ?? el);
+    return () => {
+      observer.disconnect();
+      resize?.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, []);
   const onCodeScroll = () => {
     const el = codePreRef.current;
     if (!el) return;
@@ -92,6 +132,7 @@ function CodeBlock({
       <pre
         ref={codePreRef}
         className="md-pre md-code-scroll"
+        style={{ overflowAnchor: "none", overscrollBehavior: "contain" }}
         tabIndex={0}
         onScroll={onCodeScroll}
         onWheel={(e) => {

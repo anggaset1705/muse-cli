@@ -145,7 +145,7 @@ check("detectLang: content heuristics per language", () => {
   assert.equal(detectLang(""), "");
 });
 
-check("pacing: a ~1000-char reply takes seconds, a short reply stays ~0.5 s", () => {
+check("pacing: a ~1000-char reply remains visible, short reply ~1.1 s", () => {
   const long = "Lorem ipsum dolor sit amet. ".repeat(36).slice(0, 1000);
   assert.equal(long.length, 1000);
   const r1 = runTicks(long);
@@ -155,7 +155,7 @@ check("pacing: a ~1000-char reply takes seconds, a short reply stays ~0.5 s", ()
   const short = "Halo! Kabar saya baik, terima kasih. Ada yang bisa saya bantu hari ini? Silakan tanya apa saja.";
   const r2 = runTicks(short);
   const s2 = (r2.ticks * TYPEWRITER_TICK_MS) / 1000;
-  assert.ok(s2 >= 1.8 && s2 <= 3.2, `~90 chars took ${s2.toFixed(2)} s`);
+  assert.ok(s2 >= 0.8 && s2 <= 1.6, `~90 chars took ${s2.toFixed(2)} s`);
   console.log(`      (1000 chars: ${s1.toFixed(2)} s; ~90 chars: ${s2.toFixed(2)} s)`);
 });
 

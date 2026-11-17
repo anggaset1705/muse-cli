@@ -66,6 +66,9 @@ pub mod work {
     pub const COMPUTER_INPUT: u32 = 256;
     pub const COMMAND_VERIFIED: u32 = 512;
     pub const COMPUTER_SCREENSHOT: u32 = 1024;
+    pub const SKILL_INSTALL: u32 = 2048;
+    pub const STUDIO_PLAN: u32 = 4096;
+    pub const STUDIO_RENDER: u32 = 8192;
 
     pub const COMPUTER_WORK: u32 =
         COMPUTER | COMPUTER_INTERACT | COMPUTER_ASSERT | COMPUTER_CLICK | COMPUTER_INPUT | COMPUTER_SCREENSHOT;
@@ -134,6 +137,27 @@ pub fn is_permission_question(text: &str) -> bool {
 
 /// `WorkflowPolicy.Allows`: is this tool call within the current request?
 pub fn allows(prompt: &str, tool: &str, goal: bool) -> bool {
+    // A request to CREATE a video/image is not a request to WRITE A
+    // SCRIPT that happens to output an MP4. Prevent Python/imageio/pip
+    // from being treated as a substitute for the native media gateway.
+    // This applies in goal mode as well as a normal chat.
+    let required_work = required(prompt);
+    if required_work & (work::STUDIO_PLAN | work::STUDIO_RENDER) != 0 {
+        if tool.starts_with("studio_") {
+            if matches!(tool, "studio_render_project" | "studio_render_image" | "studio_compose") {
+                return required_work & work::STUDIO_RENDER != 0;
+            }
+            return matches!(
+                tool,
+                "studio_create" | "studio_status" | "studio_character"
+                    | "studio_voice" | "studio_import_asset" | "studio_set_scene"
+                    | "studio_refresh"
+            );
+        }
+        // Inspect existing project references, without arbitrary writes,
+        // command execution, package installation or application control.
+        return matches!(tool, "list_files" | "read_file" | "read_files" | "search_files");
+    }
     if goal && !is_read_only(prompt) {
         return true;
     }
@@ -151,6 +175,23 @@ pub fn allows(prompt: &str, tool: &str, goal: bool) -> bool {
                     | "git_status"
                     | "git_diff"
             );
+    }
+    // GitHub discovery/installation are separate from workspace writes.
+    if tool == "search_github_skills" {
+        return skill_request(prompt);
+    }
+    if tool == "install_github_skill" {
+        return skill_request(prompt) && skill_install_requested(prompt);
+    }
+    // Separate real media creation from normal code/file tasks.
+    if tool.starts_with("studio_") {
+        let required = required(prompt);
+        if tool == "studio_status" || tool == "studio_refresh" { return required != work::NONE; }
+        if !studio_request(prompt) { return false; }
+        if matches!(tool,"studio_render_project" | "studio_render_image" | "studio_compose") {
+            return required & work::STUDIO_RENDER != 0;
+        }
+        return true;
     }
     let required = required(prompt);
     let diagnostic_read = required == work::READ
@@ -174,8 +215,50 @@ pub fn allows(prompt: &str, tool: &str, goal: bool) -> bool {
 }
 
 /// `LocalTaskIntent.Required`: what local work does this prompt require?
+fn skill_request(prompt: &str) -> bool {
+    let text = fold(prompt);
+    if re(r"^\s*(?:apa|apakah|bisakah|bisa|bagaimana|gimana|how|can)\b").is_match(&text) {
+        return false;
+    }
+    re(r"\bskills?\b").is_match(&text)
+        && re(r"\b(cari|search|temukan|find|pasang|install|instal|unduh|download|github)\b").is_match(&text)
+}
+fn skill_install_requested(prompt: &str) -> bool {
+    let text = fold(prompt);
+    if re(r"\b(?:jangan|tidak usah|tanpa)\b[^\n.!?]{0,35}\b(?:pasang|install|instal|unduh|download)\b").is_match(&text) {
+        return false;
+    }
+    re(r"\b(pasang|install|instal|unduh|download|tambahkan)\b").is_match(&text)
+        && !re(r"^\s*(apa|apakah|bagaimana|gimana|can|how)\b").is_match(&text)
+}
+
+fn studio_request(prompt: &str) -> bool {
+    let text=fold(prompt);
+    if re(r"^\s*(?:apa|apakah|bisa|bisakah|bagaimana|gimana|how|can|what)\b").is_match(&text) {
+        return false;
+    }
+    let topic=re(r"\b(?:video|gambar|image|images|scene|adegan|storyboard|karakter|character|voice|suara|film|animasi)\b").is_match(&text);
+    let action=re(r"\b(?:buat|buatkan|bikin|generate|render|produksi|produksikan|lanjutkan|sambung|gabung|gabungkan|compose|export|simpan|save|proyek|project)\b").is_match(&text);
+    // Explicit code requests must continue to use the coding engine.
+    // "buatkan video" has no code intent, but "buatkan script Python
+    // untuk video" explicitly asks for a script.
+    let coding=re(r"\b(?:buat|buatkan|bikin|tulis|tuliskan|create|write|rancang)\b[^\n.!?]{0,110}\b(?:script|skrip|source code|kode|program python|aplikasi|website)\b").is_match(&text);
+    topic && action && !coding
+}
+fn studio_render_requested(prompt: &str) -> bool {
+    let text=fold(prompt);
+    studio_request(prompt) && re(r"\b(?:video|gambar|image|images|render|generate|produksi|gabung|gabungkan|combine|export|film|animasi)\b").is_match(&text)
+        && !re(r"\b(?:hanya|cuma|only)\s+(?:storyboard|rencana|plan)\b").is_match(&text)
+}
+
 pub fn required(prompt: &str) -> u32 {
     let text = fold(prompt);
+    if skill_request(prompt) {
+        return if skill_install_requested(prompt) { work::SKILL_INSTALL } else { work::BROWSE };
+    }
+    if studio_request(prompt) {
+        return if studio_render_requested(prompt) {work::STUDIO_RENDER} else {work::STUDIO_PLAN};
+    }
     if is_project_explanation(prompt) {
         return work::READ;
     }
@@ -206,6 +289,31 @@ pub fn required(prompt: &str) -> u32 {
             .is_match(&text)
     {
         result |= work::EDIT;
+    }
+    // Indonesian instructions like "pada kalkulator_sederhana.py UBAH
+    // tampilan tombol = ..." are actual file edits, not prose requests.
+    // Previous rules recognized Vietnamese "sua" but missed Indonesian
+    // "ubah", "perbaiki", "ganti" etc. That let the model claim it
+    // cannot save to Windows and return a long code block with NO tools.
+    // Do not let an isolated negative constraint ("jangan mengubah")
+    // or an informational question trigger a native write.
+    let code_target = re(r"\b(?:file|berkas|script|skrip|kode|source|ui|tampilan|frontend|website|program|aplikasi|tombol|button|fungsi)\b|(?:\.[a-z0-9]{1,7})\b")
+        .is_match(&text);
+    let question_or_explanation = re(r"^\s*(?:(?:tolong|coba|mohon)\s+)?(?:apa|apakah|bisa|bisakah|bagaimana|gimana|kenapa|mengapa|how|can|what|jelaskan|terangkan|uraikan|ajarkan)\b")
+        .is_match(&text);
+    if code_target && !question_or_explanation {
+        let edit_verb = re(r"\b(?:perbaiki|benahi|rapikan|ubah|mengubah|ganti|gantikan|sunting|perbarui|memperbarui|edit|revisi|refactor|modifikasi|modifikasikan|tambahkan|menambahkan|hilangkan|hapus|perindah|tingkatkan|buat(?:kan)?|gunakan|implementasikan)\b");
+        let positive_edit = edit_verb.find_iter(&text).any(|found| {
+            let before = text[..found.start()]
+                .rsplit(|ch| matches!(ch, '.' | ',' | ';' | '!' | '?' | '\n' | '\r'))
+                .next()
+                .unwrap_or("");
+            !re(r"\b(?:jangan|tanpa|tidak|bukan|hindari|jgn|jangan\s+sampai|tidak\s+usah)\s*$")
+                .is_match(before)
+        });
+        if positive_edit {
+            result |= work::EDIT;
+        }
     }
     let edit_text = re(r"\b(?:muc )?do hoan thien\b").replace_all(&text, "muc do day du");
     if re(r"\b(doc|xem (?:file|tep|du an|ma|git)|tim (?:file|tep|loi|kiem)|kiem tra (?:du an|ma|thay doi|code)|tim hieu du an|giai thich du an|read|inspect|search files|review project)\b")
@@ -336,6 +444,12 @@ pub fn evidence(tool: &str) -> u32 {
         "read_file" | "read_files" | "search_files" | "git_diff" => work::READ,
         "list_files" | "git_status" => work::BROWSE,
         "write_file" | "edit_file" => work::EDIT,
+        "search_github_skills" => work::BROWSE,
+        "install_github_skill" => work::SKILL_INSTALL,
+        "studio_create" | "studio_character" | "studio_voice" | "studio_import_asset" | "studio_set_scene" => work::STUDIO_PLAN,
+        "studio_render_project" | "studio_render_image" | "studio_compose" => work::STUDIO_RENDER,
+        "studio_status" | "studio_refresh" => work::READ,
+
         "run_command" | "process_status" => work::COMMAND,
         "computer_inspect" => work::COMPUTER,
         "computer_screenshot" => work::COMPUTER | work::COMPUTER_SCREENSHOT,
@@ -392,6 +506,9 @@ pub fn work_to_string(flags: u32) -> String {
         (work::COMPUTER_INPUT, "ComputerInput"),
         (work::COMMAND_VERIFIED, "CommandVerified"),
         (work::COMPUTER_SCREENSHOT, "ComputerScreenshot"),
+        (work::SKILL_INSTALL, "SkillInstall"),
+        (work::STUDIO_PLAN, "StudioPlan"),
+        (work::STUDIO_RENDER, "StudioRender"),
     ];
     let parts: Vec<&str> = names
         .iter()
@@ -399,4 +516,28 @@ pub fn work_to_string(flags: u32) -> String {
         .map(|(_, name)| *name)
         .collect();
     parts.join(", ")
+}
+
+/// Return the one unambiguous source filename mentioned in an explicit
+/// workspace edit request. This is used only for a READ-ONLY native
+/// preflight inside the already selected workspace. The executor's
+/// path jail, symlink rejection, and stale-read policy still apply.
+/// If the prompt names several files, let the planner choose instead.
+pub fn unambiguous_edit_filename(prompt: &str) -> Option<String> {
+    let folded = fold(prompt);
+    if required(prompt) & work::EDIT == 0 {
+        return None;
+    }
+    let filename = re(r"\b[a-z0-9_][a-z0-9_-]{0,100}\.(?:py|rs|tsx|ts|jsx|js|css|html|json|svelte|vue|go|java|cpp|cs|sh|ps1|bat)\b");
+    let mut matches = filename
+        .find_iter(&folded)
+        .map(|part| part.as_str().to_string())
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    if matches.len() == 1 {
+        matches.pop()
+    } else {
+        None
+    }
 }

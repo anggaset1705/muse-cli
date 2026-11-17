@@ -12,6 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
 
+use sha2::Digest;
+use crate::github_skills::{self, SkillSource};
+use crate::studio::{self, MediaGateway};
 use crate::approval;
 use crate::error::json::{bool_arg, int_arg, str_arg};
 use crate::error::{AgentError, AgentResult, CancellationToken};use crate::parser::ToolCall;
@@ -179,6 +182,8 @@ pub struct ToolExecutor {
     changes: Mutex<HashMap<String, WorkspaceChange>>,
     read_versions: Mutex<HashMap<String, ReadVersion>>,
     processes: ProcessManager,
+    skills_directory: Mutex<Option<PathBuf>>,
+    studio_gateway: Mutex<Option<MediaGateway>>,
     screen: Option<Arc<dyn ScreenDriver>>,
     last_file_change_applied: Mutex<bool>,
     last_command_changed_files: Mutex<Vec<String>>,
@@ -210,11 +215,24 @@ impl ToolExecutor {
             changes: Mutex::new(HashMap::new()),
             read_versions: Mutex::new(HashMap::new()),
             processes: ProcessManager::new(),
+            skills_directory: Mutex::new(None),
+            studio_gateway: Mutex::new(None),
             screen: None,
             last_file_change_applied: Mutex::new(false),
             last_command_changed_files: Mutex::new(Vec::new()),
             last_computer_image: Mutex::new(None),
         })
+    }
+
+    /// Set by the session before a turn; must never point to a remote path.
+    pub fn set_skills_directory(&self, dir: Option<PathBuf>) {
+        *self.skills_directory.lock().unwrap() = dir;
+    }
+
+    /// Set only by the authenticated gateway after session checkout.
+    /// The API key is held in-memory and never sent to Muse's chat model.
+    pub fn set_studio_gateway(&self, gateway: Option<MediaGateway>) {
+        *self.studio_gateway.lock().unwrap() = gateway;
     }
 
     pub fn root(&self) -> &Path {
@@ -363,6 +381,30 @@ impl ToolExecutor {
             "read_files" => self.read_files(&call.args, cancel).await,
             "write_file" | "edit_file" => self.apply_prepared(prepared, cancel).await,
             "search_files" => self.search_files(&call.args, cancel).await,
+            "search_github_skills" => {
+                github_skills::search(&str_arg(&call.args, "query", "")).await
+                    .map_err(AgentError::Invalid)
+            }
+            "install_github_skill" => {
+                let source = SkillSource::from_args(&call.args).map_err(AgentError::Invalid)?;
+                let content = prepared.new_text.as_deref().ok_or_else(|| AgentError::Invalid(
+                    "No reviewed SKILL.md snapshot present; installation cancelled".to_string()
+                ))?;
+                let dir = self.skills_directory.lock().unwrap().clone().ok_or_else(|| AgentError::Invalid(
+                    "Skills folder not available for this session".to_string()
+                ))?;
+                let skill_store = muse_store::SkillStore::new(&dir)
+                    .map_err(|e| AgentError::Invalid(e.to_string()))?;
+                let skill = skill_store.import_text(&source.fallback_alias(), content)
+                    .map_err(|e| AgentError::Invalid(e.to_string()))?;
+                Ok(format!("installed_skill: {}\nname: {}\nsource: {}\nenabled: true\nSkill available immediately; execution still follows tool approvals.",
+                    skill.alias, skill.name, source.url()))
+            },
+            name if name.starts_with("studio_") => {
+                let gateway = self.studio_gateway.lock().unwrap().clone();
+                studio::dispatch(&self.root,gateway.as_ref(),name,&call.args).await
+                    .map_err(AgentError::Invalid)
+            }
             "git_status" => {
                 processes::run_git(&["status", "--short", "--branch"], &self.root, cancel).await
             }
@@ -410,7 +452,9 @@ impl ToolExecutor {
     pub fn needs_confirmation(call: &ToolCall) -> bool {
         matches!(
             call.name.as_str(),
-            "write_file" | "edit_file" | "run_command" | "process_input" | "process_stop"
+            "write_file" | "edit_file" | "run_command" | "process_input" | "process_stop" | "install_github_skill"
+                | "studio_create" | "studio_character" | "studio_voice" | "studio_import_asset"
+                | "studio_set_scene" | "studio_render_image" | "studio_render_project" | "studio_compose"
         )
     }
 
@@ -424,6 +468,12 @@ impl ToolExecutor {
             ),
             "edit_file" => format!("edit_file {}", str_arg(&call.args, "path", "")),
             "run_command" => format!("run_command: {}", str_arg(&call.args, "command", "")),
+            "search_github_skills" => format!("Search GitHub skills for: {}", str_arg(&call.args, "query", "")),
+            "studio_render_project" => format!("Render Muse Studio project '{}' in the background (may use external quota)",str_arg(&call.args,"project","")),
+            "studio_render_image" => format!("Generate external image for studio project '{}'",str_arg(&call.args,"project","")),
+            "studio_compose" => format!("Compose project '{}' clips into final.mp4",str_arg(&call.args,"project","")),
+
+            "install_github_skill" => format!("Review GitHub skill installation: {}/{} {}", str_arg(&call.args, "owner", ""), str_arg(&call.args, "repo", ""), str_arg(&call.args, "path", "")),
             _ => {
                 let parts: Vec<String> = call
                     .args
@@ -681,6 +731,32 @@ impl ToolExecutor {
     ) -> AgentResult<ToolApproval> {
         cancel.throw_if_cancelled()?;
         let call = original.clone();
+        if call.name == "install_github_skill" {
+            let source = SkillSource::from_args(&call.args).map_err(AgentError::Invalid)?;
+            let content = github_skills::preview(&source).await.map_err(AgentError::Invalid)?;
+            let (alias, name, _, _) = muse_store::skills::parse_skill(&content, &source.fallback_alias())
+                .map_err(|e| AgentError::Invalid(e.to_string()))?;
+            let dir = self.skills_directory.lock().unwrap().clone().ok_or_else(|| AgentError::Invalid(
+                "This session has no persistent SkillStore; cannot install".to_string()
+            ))?;
+            let skill_store = muse_store::SkillStore::new(&dir)
+                .map_err(|e| AgentError::Invalid(e.to_string()))?;
+            let mode = if skill_store.get(&alias).is_some() { "REPLACE existing" } else { "Install new" };
+            let digest = hex::encode(sha2::Sha256::digest(content.as_bytes()));
+            let preview = format!(
+                "EXTERNAL THIRD-PARTY SKILL — EXPLICIT REVIEW REQUIRED EVEN IN TURBO\n\nSource: {}\nName: {name}\nAlias: @{alias}\nAction: {mode}\nSHA256: {digest}\nLength: {} bytes\n\nSKILL.md content preview (first 2200 chars):\n{}\n\nSkill instructions may be malicious. Only approve sources you trust. Installed skills NEVER bypass tool permissions.",
+                source.url(), content.len(), content.chars().take(2200).collect::<String>()
+            );
+            return Ok(ToolApproval {
+                description: format!("Approve {mode} GitHub skill @{alias} from {}", source.url()),
+                preview,
+                call,
+                file_path: Some(format!("skills/{alias}.md")),
+                original_text: None,
+                new_text: Some(content),
+                file_encoding: None,
+            });
+        }
         if !matches!(call.name.as_str(), "write_file" | "edit_file") {
             let detail = if call.name == "run_command" {
                 let workdir = self.resolve_path(&str_arg(&call.args, "workdir", "."))?;

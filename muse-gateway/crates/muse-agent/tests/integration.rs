@@ -1453,3 +1453,349 @@ async fn indonesian_script_request_retries_false_completion_then_writes_real_cod
     assert!(events.iter().any(|e| e.kind == "completed"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+
+#[tokio::test]
+async fn github_skill_install_snapshot_requires_review_and_auto_loads() {
+    use muse_agent::approval;
+    use muse_agent::executor::ToolApproval;
+    use serde_json::Map;
+
+    let root = temp_workspace("github-skill-approve");
+    let skills = root.join("skills");
+    let ex = ToolExecutor::new(&root, "auto").unwrap();
+    ex.set_skills_directory(Some(skills.clone()));
+    let mut args = Map::new();
+    args.insert("owner".into(), json!("demo-owner"));
+    args.insert("repo".into(), json!("demo-skills"));
+    args.insert("ref".into(), json!("main"));
+    args.insert("path".into(), json!("skills/python/SKILL.md"));
+    let call = ToolCall::new("install_github_skill", args);
+    assert!(ToolExecutor::needs_confirmation(&call));
+    assert!(approval::requires_explicit_approval(&call), "must prompt even in Turbo");
+    assert!(!muse_agent::chat_turn::direct_tool_may_run(
+        &AgentSession::new(&root,"auto","muse-chat","English",true,None).unwrap(), &call, false
+    ));
+    let raw = "---\nname: Python Developer\ndescription: Help with Tkinter and Python\n---\nUse well-formatted Python code.\n";
+    let prepared = ToolApproval {
+        call,
+        description:"Review external skill".into(),
+        preview:"approved exact source snapshot".into(),
+        file_path:Some("skills/python.md".into()),
+        original_text:None,
+        new_text:Some(raw.into()),
+        file_encoding:None
+    };
+    let cancel=CancellationToken::new();
+    let receipt=ex.execute_prepared(&prepared,&cancel,None).await.unwrap();
+    assert!(receipt.starts_with("installed_skill: python"),"{receipt}");
+    let store=muse_store::SkillStore::new(&skills).unwrap();
+    assert_eq!(store.get("python").unwrap().content,"Use well-formatted Python code.");
+    assert_eq!(store.expand_for_prompt("Buatkan Tkinter Python calculator").1,vec!["python"]);
+    let _=std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn chat_turn_automatically_selects_skill_without_alias() {
+    let root=temp_workspace("auto-skill-agent");
+    let skills=root.join("skills");
+    write_skill_file(&skills,"react.md","---\nname: React UI\ndescription: React frontend components\n---\nFollow reusable component patterns.\n");
+    let mut session=AgentSession::new(&root,"auto","muse-chat","English",true,None).unwrap();
+    session.skills_directory=Some(skills);
+    let (driver,captured)=RecordingDriver::new(vec![PLAIN_DONE]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let outcome=run_turn(&mut session,"Explain React components",vec![],&driver,&mut events,
+        TurnOptions{interactive:true,..Default::default()},&cancel).await;
+    assert!(outcome.ok,"{outcome:?}");
+    let requests=captured.lock().await;
+    assert_eq!(app_state_of(&requests[0])["active_skills"],json!(["react"]));
+    assert!(requests[0].messages[0]["content"].as_str().unwrap().contains("Follow reusable component patterns."));
+    let _=std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn github_skill_workflow_scoping_and_evidence() {
+    use muse_agent::intent::{self,work};
+    assert_eq!(intent::required("cari skill di GitHub untuk Python") & work::BROWSE,work::BROWSE);
+    assert_eq!(intent::required("cari dan pasang skill di GitHub tentang React") & work::SKILL_INSTALL,work::SKILL_INSTALL);
+    assert_eq!(intent::required("hello") & work::SKILL_INSTALL,0);
+    assert_eq!(intent::required("apakah bisa cari skill GitHub?") & work::BROWSE,0);
+    assert_eq!(intent::required("cari skill di GitHub tapi jangan pasang") & work::SKILL_INSTALL,0);
+    assert_eq!(intent::required("cari skill di GitHub tapi jangan pasang") & work::BROWSE,work::BROWSE);
+    assert!(!intent::allows("cari skill di GitHub tapi jangan pasang","install_github_skill",false));
+    assert!(!intent::allows("hello","install_github_skill",false));
+    assert!(intent::allows("cari dan pasang skill di GitHub","install_github_skill",false));
+    assert!(intent::allows("cari skill GitHub","search_github_skills",false));
+    assert_eq!(intent::evidence("install_github_skill"),work::SKILL_INSTALL);
+}
+
+
+/// The user asked for a real ten-second AI video, not a Python animation.
+#[tokio::test]
+async fn video_request_blocks_python_fallback_and_guides_native_studio() {
+    let root=temp_workspace("video-native-route-only");
+    let mut session=AgentSession::new(&root,"auto","muse-chat","Bahasa Indonesia",true,Some(7)).unwrap();
+    let (driver,captured)=RecordingDriver::new(vec![
+        // The model's old behavior: attempt to write a Python video generator.
+        r#"{"tool_calls":[{"name":"write_file","arguments":{"path":"make_masha_bear_video.py","content":"print('fake animation')\n"}}]}"#,
+        // Corrected tool call after the executor rejects that batch.
+        r#"{"tool_calls":[{"name":"studio_create","arguments":{"name":"Masha Bear 10s","scene_count":1,"scene_duration":10,"style":"3D animated film","scene_prompts":["One continuous ten-second 3D animation scene of a girl in a forest meeting a friendly bear"]}}]}"#,
+        // No video provider has been called; a false completion is rejected.
+        PLAIN_DONE,
+        PLAIN_DONE,
+    ]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let outcome=run_turn(
+        &mut session,
+        "buatkan video masha and the beer 10 detik dengan storyboard 1 scene",
+        vec![],
+        &driver,
+        &mut events,
+        TurnOptions{interactive:true,..Default::default()},
+        &cancel
+    ).await;
+    assert_eq!(outcome.status,"incomplete","no video render was approved");
+    assert!(!root.join("make_masha_bear_video.py").exists(),
+        "video request must not write Python fallback source");
+    assert!(root.join(".muse-studio/masha-bear-10s/project.json").is_file(),
+        "agent should save its native Studio project instead");
+    let project=muse_agent::studio::load(&root,"masha-bear-10s").unwrap();
+    assert_eq!(project.scenes.len(),1);
+    assert_eq!(project.scenes[0].duration,10);
+    assert!(project.scenes[0].video_task.is_none(),"no unapproved media quota should be used");
+    assert!(!events.iter().any(|e| e.kind=="tool_start" && e.tool.as_deref()==Some("write_file")),
+        "the Python attempt must be rejected before execution");
+    assert!(events.iter().any(|e|e.kind=="tool_start"&&e.tool.as_deref()==Some("studio_create")),
+        "the valid project setup should execute");
+    let reqs=captured.lock().await;
+    assert!(reqs.len()>=3,"expected route correction and native project creation");
+    assert!(app_state_of(&reqs[0])["next"].as_str().unwrap().contains("NATIVE MEDIA PRODUCTION"));
+    assert!(reqs[1].messages.iter().any(|m|
+        m["content"].as_str().is_some_and(|s|s.contains("MEDIA ROUTE CORRECTION"))
+    ),"the repair prompt must teach native Studio tools instead of falsely marking chat read-only");
+    let _=std::fs::remove_dir_all(&root);
+}
+
+
+/// Regression: exact screenshot should get a local Studio project and
+/// an explicit media approval without waiting for a browser/model token.
+#[tokio::test]
+async fn video_10_seconds_starts_native_studio_without_calling_browser_model() {
+    let root=temp_workspace("fast-video-no-first-token");
+    let mut session=AgentSession::new(
+        &root,"auto","muse-chat","Bahasa Indonesia",true,Some(3)).unwrap();
+    let (driver,captured)=RecordingDriver::new(vec![PLAIN_DONE]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let outcome=run_turn(
+        &mut session,
+        "Buatkan video 3D Masha and the Bear 10 detik.",
+        vec![],
+        &driver,
+        &mut events,
+        TurnOptions{interactive:false,..Default::default()},
+        &cancel
+    ).await;
+    assert_eq!(outcome.status,"declined","render without approval must NOT execute");
+    assert_eq!(captured.lock().await.len(),0,
+        "straightforward video should not call the Muse web planner at all");
+    assert!(events.iter().any(|e| e.kind=="tool_start" &&
+        e.tool.as_deref()==Some("studio_create")));
+    assert!(events.iter().any(|e| e.kind=="tool_result" &&
+        e.tool.as_deref()==Some("studio_create")));
+    assert!(!events.iter().any(|e| e.kind=="tool_result" &&
+        e.tool.as_deref()==Some("studio_render_project")),
+        "no explicit approval means no billable render");
+    assert!(!root.join("make_masha_bear_video.py").exists());
+    let projects=root.join(".muse-studio");
+    let entry=std::fs::read_dir(&projects).unwrap().next().unwrap().unwrap();
+    let project_id=entry.file_name().to_string_lossy().to_string();
+    let project=muse_agent::studio::load(&root,&project_id).unwrap();
+    assert_eq!(project.scenes.len(),1);
+    assert_eq!(project.scenes[0].duration,10);
+    assert!(project.scenes[0].video_task.is_none());
+    assert!(session.history.iter().any(|m|m["muse_tool"]=="studio_create"),
+        "project creation receipt should persist in conversation history");
+    let _=std::fs::remove_dir_all(&root);
+}
+
+
+#[tokio::test]
+async fn existing_file_edit_streams_authentic_before_and_after_to_workspace_editor() {
+    let root = temp_workspace("live-edit-existing");
+    std::fs::write(root.join("calculator.py"), "value = 1\nprint(value)\n").unwrap();
+    let mut session = AgentSession::new(&root,"auto","muse-chat","English",true,None).unwrap();
+    let driver = ScriptDriver::new(vec![
+        r#"{"tool_calls":[{"name":"read_file","arguments":{"path":"calculator.py"}}]}"#,
+        r#"{"tool_calls":[{"name":"edit_file","arguments":{"path":"calculator.py","old_text":"value = 1","new_text":"value = 2"}}]}"#,
+        r#"{"status":"completed","summary":"Updated calculator.py."}"#,
+    ]);
+    let mut events = Vec::<AgentEvent>::new();
+    let cancellation = CancellationToken::new();
+    let outcome = run_turn(
+        &mut session,"edit calculator.py and change value to two",vec![],
+        &driver,&mut events,TurnOptions{interactive:true,..Default::default()},&cancellation
+    ).await;
+    assert!(outcome.ok,"{outcome:?}");
+    assert_eq!(std::fs::read_to_string(root.join("calculator.py")).unwrap(),"value = 2\nprint(value)\n");
+    let begin=events.iter().position(|e|e.kind=="tool_edit_begin").expect("existing file should open live editor");
+    let content=events.iter().position(|e|e.kind=="tool_content").expect("new validated code should be streamed");
+    let result=events.iter().position(|e|e.kind=="tool_result" && e.tool.as_deref()==Some("edit_file")).expect("real edit receipt");
+    assert!(begin<content && content<result,"before/after preview must arrive prior to real disk write receipt");
+    let before:String=events.iter().filter(|e|e.kind=="tool_edit_before").map(|e|e.text.as_str()).collect();
+    let after:String=events.iter().filter(|e|e.kind=="tool_content").map(|e|e.text.as_str()).collect();
+    assert_eq!(before,"value = 1\nprint(value)\n");
+    assert_eq!(after,"value = 2\nprint(value)\n");
+    assert!(events[begin].text.contains("-value = 1")||events[begin].text.contains("value = 2"));
+    let _=std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn newly_created_source_stays_in_chat_code_card_not_live_editor() {
+    let root=temp_workspace("live-edit-new-file");
+    let mut session=AgentSession::new(&root,"auto","muse-chat","English",true,None).unwrap();
+    let driver=ScriptDriver::new(vec![
+        r#"{"tool_calls":[{"name":"write_file","arguments":{"path":"new_tool.py","content":"print('new')\n"}}]}"#,
+        r#"{"status":"completed","summary":"New tool created."}"#,
+    ]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let outcome=run_turn(
+        &mut session,"create a new Python script new_tool.py",
+        vec![],&driver,&mut events,TurnOptions{interactive:true,..Default::default()},&cancel
+    ).await;
+    assert!(outcome.ok,"{outcome:?}");
+    assert!(!events.iter().any(|e|e.kind=="tool_edit_begin"||e.kind=="tool_edit_before"),
+        "new file must NOT be routed to right-side existing-file editor");
+    let content:String=events.iter().filter(|e|e.kind=="tool_content").map(|e|e.text.as_str()).collect();
+    assert_eq!(content,"print('new')\n");
+    assert!(root.join("new_tool.py").is_file());
+    let _=std::fs::remove_dir_all(root);
+}
+
+
+/// Regression 17 Nov: Indonesian "ubah tampilan tombol" in an existing
+/// Python file MUST NOT be satisfied by dumping a long Python code
+/// fence in chat with "I cannot write directly to your PC". It must
+/// read the actual local file and execute its verified edit.
+#[tokio::test]
+async fn indonesian_button_edit_rejects_unwritten_code_then_edits_real_file() {
+    let root = temp_workspace("id-button-edit-real-file");
+    std::fs::write(
+        root.join("kalkulator_sederhana.py"),
+        "BTN_BG = '#334155'\n\ndef hitung(a, b):\n    return a + b\n",
+    ).unwrap();
+    let mut session=AgentSession::new(
+        &root, "auto", "muse-chat", "Bahasa Indonesia", true, None,
+    ).unwrap();
+    let driver = ScriptDriver::new(vec![
+        r#"{"status":"completed","summary":"Saya tidak bisa menulis langsung ke folder itu di PC Anda. Berikut kodenya, simpan sendiri."}"#,
+        r#"{"tool_calls":[{"name":"read_file","arguments":{"path":"kalkulator_sederhana.py"}}]}"#,
+        r#"{"tool_calls":[{"name":"edit_file","arguments":{"path":"kalkulator_sederhana.py","old_text":"BTN_BG = '#334155'","new_text":"BTN_BG = '#2563EB'"}}]}"#,
+        r#"{"status":"completed","summary":"Warna tombol sama dengan berhasil diperbarui."}"#,
+    ]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let result=run_turn(
+        &mut session,
+        "pada kalkulator_sederhana.py ubah tampilan tombol sama dengan (=) menjadi lebih profesional, gunakan warna biru dan efek hover. Jangan mengubah fungsi kalkulator lainnya.",
+        vec![], &driver, &mut events,
+        TurnOptions{interactive:true,..Default::default()}, &cancel,
+    ).await;
+    assert!(result.ok,"{result:?}");
+    let saved=std::fs::read_to_string(root.join("kalkulator_sederhana.py")).unwrap();
+    assert!(saved.contains("BTN_BG = '#2563EB'"), "{saved}");
+    assert!(saved.contains("    return a + b"),"unrelated math function must be preserved");
+    assert!(events.iter().any(|e|e.kind=="protocol_retry"),"no-tool response must be retried");
+    assert!(events.iter().any(|e|e.kind=="tool_start"&&e.tool.as_deref()==Some("read_file")));
+    assert!(events.iter().any(|e|e.kind=="tool_start"&&e.tool.as_deref()==Some("edit_file")));
+    assert!(events.iter().any(|e|e.kind=="tool_result"&&e.tool.as_deref()==Some("edit_file")));
+    assert!(events.iter().any(|e|e.kind=="completed"));
+    let _=std::fs::remove_dir_all(&root);
+}
+
+
+/// The exact 14:49 screenshot request should never require the model to
+/// discover and read an unambiguous existing file from scratch. A
+/// read-only native preflight feeds it the real source and records the
+/// stale-read hash before the first web-planner response. No auto-write.
+#[tokio::test]
+async fn exact_screenshot_color_change_preflights_read_then_edits_with_receipt() {
+    let root=temp_workspace("single-edit-native-preflight");
+    let filename="kalkulator_sederhana.py";
+    let original="import tkinter as tk\n\nBUTTON_BG = '#E0E5EC'\n\ndef hitung(a, b):\n    return a + b\n";
+    std::fs::write(root.join(filename),original).unwrap();
+    let mut session=AgentSession::new(&root,"auto","muse-chat","Bahasa Indonesia",true,None).unwrap();
+    // The model is deliberately given no explicit read_file response:
+    // only the local preflight made that source available.
+    let driver=ScriptDriver::new(vec![
+        r#"{"tool_calls":[{"name":"edit_file","arguments":{"path":"kalkulator_sederhana.py","old_text":"BUTTON_BG = '#E0E5EC'","new_text":"BUTTON_BG = '#2563EB'"}}]}"#,
+        r#"{"status":"completed","summary":"Tombol menjadi biru. File sudah disimpan."}"#,
+    ]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let outcome=run_turn(
+        &mut session,
+        "ubah tombol kalkulator_sederhana.py menjadi warna biru semua",
+        vec![], &driver, &mut events,
+        TurnOptions{interactive:true,..Default::default()}, &cancel,
+    ).await;
+    assert!(outcome.ok,"outcome: {outcome:?}");
+    let saved=std::fs::read_to_string(root.join(filename)).unwrap();
+    assert!(saved.contains("BUTTON_BG = '#2563EB'"),"{saved}");
+    assert!(saved.contains("    return a + b"),"math must be preserved");
+    let read=events.iter().position(|e|e.kind=="tool_start"&&e.tool.as_deref()==Some("read_file")).expect("preflight must read first");
+    let write=events.iter().position(|e|e.kind=="tool_start"&&e.tool.as_deref()==Some("edit_file")).expect("must edit file");
+    assert!(read<write,"native read before native edit");
+    assert!(events.iter().any(|e|e.kind=="tool_result"&&e.tool.as_deref()==Some("read_file")));
+    assert!(events.iter().any(|e|e.kind=="tool_result"&&e.tool.as_deref()==Some("edit_file")));
+    assert!(events.iter().any(|e|e.kind=="completed"));
+    let _=std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn edit_preflight_is_read_only_if_model_never_produces_real_operations() {
+    let root=temp_workspace("single-edit-refusal-no-write");
+    let filename="kalkulator_sederhana.py";
+    let original="import tkinter as tk\n\nBUTTON_BG = '#E0E5EC'\n";
+    std::fs::write(root.join(filename),original).unwrap();
+    let mut session=AgentSession::new(&root,"auto","muse-chat","Bahasa Indonesia",true,None).unwrap();
+    let driver=ScriptDriver::new(vec![
+        r#"{"status":"completed","summary":"Tombol selesai diubah."}"#,
+        r#"{"status":"completed","summary":"Selesai."}"#,
+        r#"{"status":"completed","summary":"Sudah."}"#,
+    ]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let result=run_turn(
+        &mut session,
+        "ubah tombol kalkulator_sederhana.py menjadi warna biru semua",
+        vec![], &driver, &mut events,
+        TurnOptions{interactive:true,..Default::default()}, &cancel,
+    ).await;
+    assert!(!result.ok,"refusal without edit must not claim success");
+    assert_eq!(std::fs::read_to_string(root.join(filename)).unwrap(),original);
+    assert!(events.iter().any(|e|e.kind=="tool_result"&&e.tool.as_deref()==Some("read_file")));
+    assert!(!events.iter().any(|e|e.kind=="tool_start"&&e.tool.as_deref()==Some("edit_file")));
+    let _=std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn normal_chat_never_preflights_file_or_writes() {
+    let root=temp_workspace("small-talk-no-file-read");
+    std::fs::write(root.join("kalkulator_sederhana.py"),"print(42)\n").unwrap();
+    let mut session=AgentSession::new(&root,"auto","muse-chat","Bahasa Indonesia",true,None).unwrap();
+    let driver=ScriptDriver::new(vec![r#"{"status":"completed","summary":"Kabar baik."}"#]);
+    let mut events=Vec::<AgentEvent>::new();
+    let cancel=CancellationToken::new();
+    let result=run_turn(
+        &mut session,"halo apa kabar? ini dengan siapa?",
+        vec![],&driver,&mut events,TurnOptions{interactive:true,..Default::default()},&cancel,
+    ).await;
+    assert!(result.ok,"{result:?}");
+    assert!(!events.iter().any(|e|e.kind=="tool_start"));
+    assert_eq!(std::fs::read_to_string(root.join("kalkulator_sederhana.py")).unwrap(),"print(42)\n");
+    let _=std::fs::remove_dir_all(root);
+}

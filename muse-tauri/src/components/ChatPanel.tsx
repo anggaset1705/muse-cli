@@ -35,11 +35,14 @@ import { formatTime } from "@/lib/types";
 import { t, tf, type Lang } from "@/lib/i18n";
 import { typewriterStep, liveContentStep, TYPEWRITER_TICK_MS } from "@/lib/typewriter";
 import { highlightCode, langFromPath, detectLang } from "@/lib/highlight";
+import { highlightToolOutput, highlightCodeDiff } from "@/lib/toolOutputHighlight";
 import { toolIcon, toolSummary } from "@/lib/toolSummaries";
 import { ranCommandLine, ranTitle, shouldShowRanOutput } from "@/lib/ranCard";
 import { reconcileScrollFollow } from "@/lib/scrollFollow";
 import { ranCodeSequence, shouldDeferRanCards } from "@/lib/ranSequence";
 import { MessageView } from "./MessageView";
+import { StudioProgressCard } from "./StudioProgressCard";
+import { studioProjectIdFromAction } from "@/lib/studioProgress";
 
 interface Props {
   lang: Lang;
@@ -53,6 +56,10 @@ interface Props {
   streamingPlan: ToolPlanAction[] | null;
   /** Live agent actions for the message currently streaming (or last turn). */
   streamingActions: ToolActionState[] | null;
+  /** Authenticated, workspace-scoped Studio progress (read-only). */
+  studioSessionId: string | null;
+  gatewayBaseUrl: string;
+  gatewayApiKey: string;
   /** Live thinking trail for the current turn (A4). */
   streamingThoughts: string[];
   /** True while a /goal turn is running (A15). */
@@ -236,7 +243,7 @@ function LiveCode({
         <pre
           ref={codePreRef}
           className="md-pre md-code-scroll"
-          style={{ maxHeight: "24rem" }}
+          style={{ maxHeight: "24rem", overflowAnchor: "none", overscrollBehavior: "contain" }}
           tabIndex={0}
           onScroll={onCodeScroll}
           onWheel={(e) => {
@@ -288,6 +295,9 @@ function RanCard({
   a,
   lang,
   live,
+  studioSessionId,
+  gatewayBaseUrl,
+  gatewayApiKey,
   animateCode,
   deferCode,
   pendingApproval,
@@ -297,6 +307,9 @@ function RanCard({
 }: {
   a: ToolActionState;
   lang: Lang;
+  studioSessionId: string | null;
+  gatewayBaseUrl: string;
+  gatewayApiKey: string;
   /** True while this card renders from the live streaming actions. */
   live: boolean;
   /** Code of the current turn types from empty even after the tool finishes. */
@@ -309,6 +322,7 @@ function RanCard({
   onViewTerminal: () => void;
 }) {
   const done = a.status === "done" || a.status === "error";
+  const studioProjectId = a.status === "done" ? studioProjectIdFromAction(a) : null;
   const summary = toolSummary(a.tool, a.path, a.description, done, lang);
   const title = ranTitle(a.tool, a.description);
   const cmdLine = ranCommandLine(a.tool, a.description, a.path);
@@ -338,7 +352,9 @@ function RanCard({
       case "awaiting_approval":
         return (
           <span className={`shrink-0 text-[11px] font-medium ${statusColor(a.status)}`}>
-            {t(lang, "agentAwaitingApproval")}
+            {live && pendingApproval?.approvalId === a.approvalId
+              ? t(lang, "agentAwaitingApproval")
+              : t(lang, "agentApprovalNoLongerPending")}
           </span>
         );
       case "denied":
@@ -388,17 +404,21 @@ function RanCard({
           {a.preview && (
             <div>
               <p className="mb-1 text-[11px] font-medium text-[#A1A1AA]">{t(lang, "toolPreview")}</p>
-              <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]">
-                {a.preview.slice(0, 4000)}
-              </pre>
+              <pre
+                className="md-body max-h-48 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]"
+                dangerouslySetInnerHTML={{ __html: /^(?:@@|--- |\+\+\+ )/m.test(a.preview)
+                  ? highlightCodeDiff(a.preview.slice(0, 4000), a.path)
+                  : highlightToolOutput(a.tool, a.preview.slice(0, 4000), a.path, a.status) }}
+              />
             </div>
           )}
           {visibleResult && (
             <div className={a.preview ? "mt-2" : ""}>
               <p className="mb-1 text-[11px] font-medium text-[#A1A1AA]">{t(lang, "toolOutput")}</p>
-              <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]">
-                {visibleResult.slice(0, 4000)}
-              </pre>
+              <pre
+                className="md-body max-h-48 overflow-auto whitespace-pre-wrap rounded border border-[#343541] bg-[#17171D] p-2 font-mono text-[11px] leading-relaxed text-[#A1A1AA]"
+                dangerouslySetInnerHTML={{ __html: highlightToolOutput(a.tool, visibleResult.slice(0, 4000), a.path, a.status) }}
+              />
             </div>
           )}
         </div>
@@ -429,6 +449,15 @@ function RanCard({
           </>
         )}
       </div>
+      {studioProjectId && studioSessionId && (
+        <StudioProgressCard
+          lang={lang}
+          baseUrl={gatewayBaseUrl}
+          apiKey={gatewayApiKey}
+          sessionId={studioSessionId}
+          projectId={studioProjectId}
+        />
+      )}
     </div>
   );
 }
@@ -453,9 +482,10 @@ function ToolPlanSection({ actions, lang }: { actions: ToolPlanAction[]; lang: L
       {open && (
         <div className="border-t border-[#343541] px-3 py-2">
           <p className="mb-2 text-[11px] text-[#71717A]">{t(lang, "toolPlanNote")}</p>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[#A1A1AA]">
-            {JSON.stringify(actions, null, 2)}
-          </pre>
+          <pre
+            className="md-body max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[#A1A1AA]"
+            dangerouslySetInnerHTML={{ __html: highlightCode(JSON.stringify(actions, null, 2), "json") }}
+          />
         </div>
       )}
     </div>
@@ -498,6 +528,9 @@ function MessageRow({
   onApprove,
   onAbortApproval,
   onViewTerminal,
+  studioSessionId,
+  gatewayBaseUrl,
+  gatewayApiKey,
 }: {
   msg: ChatMessage;
   lang: Lang;
@@ -523,6 +556,9 @@ function MessageRow({
   onApprove: (approvalId: string, approved: boolean) => void;
   onAbortApproval: (approvalId: string) => void;
   onViewTerminal: () => void;
+  studioSessionId: string | null;
+  gatewayBaseUrl: string;
+  gatewayApiKey: string;
 }) {
   const [copied, setCopied] = useState(false);
   // The message text follows the typewriter (keeps typing after the turn
@@ -613,6 +649,9 @@ function MessageRow({
               a={a}
               lang={lang}
               live={isStreamingTarget}
+              studioSessionId={studioSessionId}
+              gatewayBaseUrl={gatewayBaseUrl}
+              gatewayApiKey={gatewayApiKey}
               animateCode={ranPlayback.animate}
               deferCode={ranPlayback.defer}
               pendingApproval={pendingApproval}
@@ -1031,7 +1070,7 @@ export function ChatPanel(props: Props) {
             setStickToBottom(false);
             setShowJump(true);
           }
-        }} className="relative min-h-0 flex-1 overflow-y-auto py-2" role="log" aria-label={t(lang, "messages")}>
+        }} style={{ overflowAnchor: "none" }} className="relative min-h-0 flex-1 overflow-y-auto py-2" role="log" aria-label={t(lang, "messages")}>
         {messages.length === 0 && !props.streaming && (
           <div className="flex h-full flex-col items-center justify-center px-6 py-8 text-center">
             <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#71717A]">{t(lang, "welcomeEyebrow")}</p>
@@ -1103,6 +1142,9 @@ export function ChatPanel(props: Props) {
             onApprove={props.onApprove}
             onAbortApproval={props.onAbortApproval}
             onViewTerminal={props.onViewTerminal}
+            studioSessionId={props.studioSessionId}
+            gatewayBaseUrl={props.gatewayBaseUrl}
+            gatewayApiKey={props.gatewayApiKey}
           />
         ))}
         {props.streaming && props.goalActive && (

@@ -72,15 +72,15 @@ function runTicks(full, { feed = Infinity, endAt = 0, maxTicks = 5000 } = {}) {
 
 console.log("typewriter engine (real src/lib/typewriter.ts):");
 
-check("step size: 3/tick for a short gap, 6 for gap>600, 12 for gap>2000", () => {
-  assert.equal(typewriterStepSize(90), 1);
-  assert.equal(typewriterStepSize(600), 1);
-  assert.equal(typewriterStepSize(601), 2);
-  assert.equal(typewriterStepSize(2000), 2);
+check("balanced 2/3/4 chars per tick based on backlog", () => {
+  assert.equal(typewriterStepSize(90), 2);
+  assert.equal(typewriterStepSize(600), 2);
+  assert.equal(typewriterStepSize(601), 3);
+  assert.equal(typewriterStepSize(2000), 3);
   assert.equal(typewriterStepSize(2001), 4);
 });
 
-check("(i) one full ~90 char delta, streaming ends at once: types gradually, ~0.5 s, ends full", () => {
+check("(i) one full ~90 char delta, streaming ends at once: ~1.1 s and exact result", () => {
   const target =
     "Halo! Kabar saya baik, terima kasih. Ada yang bisa saya bantu hari ini? Silakan tanya apa saja.";
   assert.ok(target.length >= 85 && target.length <= 100, `fixture is ${target.length} chars`);
@@ -95,7 +95,7 @@ check("(i) one full ~90 char delta, streaming ends at once: types gradually, ~0.
   }
   assert.equal(displayed, target);
   const seconds = (ticks * TYPEWRITER_TICK_MS) / 1000;
-  assert.ok(seconds >= 1.8 && seconds <= 3.2, `took ${seconds.toFixed(2)} s for ${target.length} chars`);
+  assert.ok(seconds >= 0.8 && seconds <= 1.6, `took ${seconds.toFixed(2)} s for ${target.length} chars`);
   console.log(`      (${target.length} chars in ${ticks} ticks = ${seconds.toFixed(2)} s)`);
 });
 

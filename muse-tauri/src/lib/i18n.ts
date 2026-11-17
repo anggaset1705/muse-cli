@@ -117,6 +117,7 @@ const STRINGS: Record<string, { en: string; id: string }> = {
   showOutput: { en: "Show output", id: "Tampilkan output" },
   hideOutput: { en: "Hide output", id: "Sembunyikan output" },
   agentAwaitingApproval: { en: "waiting for your approval", id: "menunggu persetujuan Anda" },
+  agentApprovalNoLongerPending: { en: "approval no longer pending", id: "persetujuan tidak lagi menunggu" },
   agentDenied: { en: "denied", id: "ditolak" },
   approve: { en: "Approve", id: "Setujui" },
   deny: { en: "Deny", id: "Tolak" },

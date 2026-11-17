@@ -75,6 +75,36 @@ use crate::upstream::Upstream;
 /// Alias pengaturan driver (satu definisi saja — lihat `config.rs`).
 pub type BrowserConfig = DriverSettings;
 
+/// Local-tool plans for real code/UI edits can spend longer than 45s
+/// preparing a structured first response. Preserve the original short
+/// timeout for ordinary chat, while allowing the same bounded window
+/// previously reserved for storyboard requests. No automatic retry or
+/// resubmission: this only changes how long the existing request waits.
+fn local_first_reply_window(prompt: &str, settings: &DriverSettings) -> f64 {
+    let query = prompt.to_lowercase();
+    let has = |terms: &[&str]| terms.iter().any(|term| query.contains(term));
+    let media_work = has(&["buatkan", "bikin", "generate", "render", "create", "make"])
+        && has(&["video", "gambar", "image", "animasi", "film"])
+        && !has(&["script", "skrip", "python", "source code", "kode"]);
+    let code_work = has(&[
+        "perbaiki", "benahi", "rapikan", "ubah", "edit", "revisi",
+        "refactor", "refaktor", "fix", "repair", "improve", "modify",
+        "update", "tambahkan", "buatkan", "bikin", "tulis", "create",
+        "implement", "kembangkan", "desain", "design", "rewrite",
+        "optimalkan", "polish", "buat ", "make ",
+    ]) && has(&[
+        "script", "skrip", "python", "source code", "kode", "file",
+        ".py", ".tsx", ".jsx", ".ts", ".js", ".rs", ".html", ".css",
+        ".json", ".svelte", ".go", ".java", ".cpp", ".cs", ".vue",
+        "ui", "tampilan", "frontend", "website", "aplikasi", "app",
+    ]);
+    if media_work || code_work {
+        settings.first_token_timeout.max(150.0).min(settings.chat_timeout)
+    } else {
+        settings.first_token_timeout.min(settings.chat_timeout)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JSON hasil eval JS (Dom.cs)
 // ---------------------------------------------------------------------------
@@ -1099,12 +1129,16 @@ impl BrowserDriver {
     /// dari delta parsial DOM).
     async fn poll_local(
         &self,
-        _req: &ChatRequest,
+        req: &ChatRequest,
         tab: &mut TabState,
         request_id: &str,
         tx: &tokio::sync::mpsc::Sender<Result<ChatEvent, MuseError>>,
     ) -> Result<(), MuseError> {
         let settings = &self.inner.settings;
+        // Code/UI edit plans and complex media storyboards may need longer
+        // for the first validated reply than a plain chat. All existing
+        // absolute/idle bounds, cancellation and no-resend rules remain.
+        let first_reply_window = local_first_reply_window(&req.prompt, settings);
         let started = Instant::now();
         let mut last: Option<String> = None;
         let mut stable = 0usize;
@@ -1118,7 +1152,7 @@ impl BrowserDriver {
             if elapsed > settings.chat_timeout {
                 return Err(MuseError::upstream_timeout("assistant reply timed out"));
             }
-            if !got_first && elapsed > settings.first_token_timeout {
+            if !got_first && elapsed > first_reply_window {
                 return Err(MuseError::upstream_response_unavailable(
                     "No distinct assistant reply could be read from Muse web before timeout. Conversation retained; no automatic resend.",
                 ));
@@ -2157,6 +2191,48 @@ async fn spawn_rate_limit_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_coding_edit_gets_bounded_150_second_first_reply_window() {
+        let settings = DriverSettings::default();
+        assert_eq!(settings.first_token_timeout, 45.0);
+        // Exact user report: this previously hit 45s with no first JSON.
+        assert_eq!(
+            local_first_reply_window(
+                "perbaiki UI kalkulator_sederhana.py dan gunakan ui style neumorphism yang profesional",
+                &settings,
+            ),
+            150.0,
+        );
+        assert_eq!(local_first_reply_window("fix UI of main.tsx", &settings), 150.0);
+        assert_eq!(local_first_reply_window("refactor backend app.rs", &settings), 150.0);
+        assert_eq!(local_first_reply_window("buatkan script python baru", &settings), 150.0);
+        assert_eq!(local_first_reply_window("ubah tampilan aplikasi", &settings), 150.0);
+    }
+
+    #[test]
+    fn local_first_reply_preserves_fast_chat_and_media_limits() {
+        let settings = DriverSettings::default();
+        assert_eq!(local_first_reply_window("halo", &settings), 45.0);
+        assert_eq!(local_first_reply_window("apa itu Python?", &settings), 45.0);
+        assert_eq!(local_first_reply_window("cek status alat", &settings), 45.0);
+        // Keep the previous native media safeguard and don't resubmit.
+        assert_eq!(local_first_reply_window("buatkan video 10 detik", &settings), 150.0);
+        assert_eq!(local_first_reply_window("buatkan skrip video python", &settings), 150.0);
+        let shortened = DriverSettings {
+            chat_timeout: 90.0,
+            ..settings.clone()
+        };
+        assert_eq!(
+            local_first_reply_window("perbaiki UI kalkulator_sederhana.py", &shortened),
+            90.0,
+        );
+        let configured = DriverSettings {
+            first_token_timeout: 175.0,
+            ..settings
+        };
+        assert_eq!(local_first_reply_window("fix UI main.tsx", &configured), 175.0);
+    }
 
     #[test]
     fn is_thread_url_matches_dotnet() {
